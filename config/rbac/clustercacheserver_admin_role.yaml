@@ -1,7 +1,7 @@
-# This rule is not used by the project template-k8s-operator itself.
+# This rule is not used by the project operator-cache itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants full permissions ('*') over sample.craftainer.dev.
+# Grants full permissions ('*') over cache.craftainer.dev.
 # This role is intended for users authorized to modify roles and bindings within the cluster,
 # enabling them to delegate specific permissions to other users or groups as needed.
 
@@ -9,19 +9,19 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
-    app.kubernetes.io/name: template-k8s-operator
+    app.kubernetes.io/name: operator-cache
     app.kubernetes.io/managed-by: kustomize
-  name: greeting-admin-role
+  name: clustercacheserver-admin-role
 rules:
 - apiGroups:
-  - sample.craftainer.dev
+  - cache.craftainer.dev
   resources:
-  - greetings
+  - clustercacheservers
   verbs:
   - '*'
 - apiGroups:
-  - sample.craftainer.dev
+  - cache.craftainer.dev
   resources:
-  - greetings/status
+  - clustercacheservers/status
   verbs:
   - get

@@ -1,0 +1,11 @@
+apiVersion: cache.craftainer.dev/v1alpha1
+kind: CacheServer
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-cache
+    app.kubernetes.io/managed-by: kustomize
+  name: team-cache
+  namespace: team-a
+spec:
+  host: valkey.team-a.svc
+  adminCredentialsSecretRef: {name: team-cache-admin}

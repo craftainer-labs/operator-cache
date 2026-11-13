@@ -1,0 +1,11 @@
+apiVersion: cache.craftainer.dev/v1alpha1
+kind: ClusterCacheServer
+metadata:
+  labels:
+    app.kubernetes.io/name: operator-cache
+    app.kubernetes.io/managed-by: kustomize
+  name: valkey
+spec:
+  host: valkey.cache.svc.cluster.local
+  adminCredentialsSecretRef: {name: valkey-admin, namespace: craftainer-system}
+  allowedNamespaces: {from: All}

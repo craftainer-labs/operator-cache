@@ -20,8 +20,14 @@ resources:
 - metrics_reader_role.yaml
 # For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
 # default, aiding admins in cluster management. Those roles are
-# not used by the template-k8s-operator itself. You can comment the following lines
+# not used by the operator-cache itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
-- greeting_admin_role.yaml
-- greeting_editor_role.yaml
-- greeting_viewer_role.yaml
+- clustercacheserver_admin_role.yaml
+- clustercacheserver_editor_role.yaml
+- clustercacheserver_viewer_role.yaml
+- cacheserver_admin_role.yaml
+- cacheserver_editor_role.yaml
+- cacheserver_viewer_role.yaml
+- cacheuser_admin_role.yaml
+- cacheuser_editor_role.yaml
+- cacheuser_viewer_role.yaml
