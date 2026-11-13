@@ -64,7 +64,7 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 			},
 		}
 	}
-	
+
 	Describe("ClusterCacheServer", func() {
 		It("applies the schema defaults", func() {
 			Expect(create(clusterServer("defaults"))).To(Succeed())
