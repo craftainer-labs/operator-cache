@@ -10,19 +10,36 @@ plugins:
   helm.kubebuilder.io/v2-alpha:
     manifests: dist/install.yaml
     output: charts
-projectName: template-k8s-operator
-repo: github.com/craftainer/template-k8s-operator
+projectName: operator-cache
+repo: github.com/craftainer-labs/operator-cache
 resources:
 - api:
     crdVersion: v1
-    namespaced: true
-  controller: true
   domain: craftainer.dev
-  group: sample
-  kind: Greeting
-  path: github.com/craftainer/template-k8s-operator/api/v1alpha1
+  group: cache
+  kind: ClusterCacheServer
+  path: github.com/craftainer-labs/operator-cache/api/v1alpha1
   version: v1alpha1
   webhooks:
     validation: true
     webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: craftainer.dev
+  group: cache
+  kind: CacheServer
+  path: github.com/craftainer-labs/operator-cache/api/v1alpha1
+  version: v1alpha1
+  webhooks:
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: craftainer.dev
+  group: cache
+  kind: CacheUser
+  path: github.com/craftainer-labs/operator-cache/api/v1alpha1
+  version: v1alpha1
 version: "3"

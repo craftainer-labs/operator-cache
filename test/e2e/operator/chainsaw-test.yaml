@@ -1,6 +1,7 @@
 # Installs the Helm chart into a Pod Security `restricted` namespace, with the
-# manager running as an arbitrary UID, then exercises the sample API end to
-# end. The steps run in order; the cluster is thrown away afterwards.
+# manager running as an arbitrary UID, then exercises the cache.craftainer.dev API
+# end to end: the CRDs, their defaults and the webhooks (the controllers come
+# later). The steps run in order; the cluster is thrown away afterwards.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -18,7 +19,7 @@ spec:
             timeout: 5m
             env:
               - name: RELEASE
-                value: template-k8s-operator
+                value: operator-cache
             content: |
               set -eu
               helm upgrade --install "$RELEASE" "$E2E_CHART_DIR" --namespace "$NAMESPACE" \
@@ -33,12 +34,12 @@ spec:
               apiVersion: apps/v1
               kind: Deployment
               metadata:
-                name: template-k8s-operator-controller-manager
+                name: operator-cache-controller-manager
               status:
                 availableReplicas: 1
       cleanup:
         - script:
-            content: helm uninstall template-k8s-operator --namespace "$NAMESPACE" --ignore-not-found
+            content: helm uninstall operator-cache --namespace "$NAMESPACE" --ignore-not-found
 
     - name: runs as an arbitrary UID with leader election
       try:
@@ -54,115 +55,92 @@ spec:
               apiVersion: coordination.k8s.io/v1
               kind: Lease
               metadata:
-                name: template-k8s-operator.craftainer.dev
+                name: operator-cache.craftainer.dev
               (spec.holderIdentity != null): true
 
-    - name: a Greeting becomes Ready
+    - name: the CRDs are established
       try:
-        - apply:
-            file: greeting.yaml
-        - assert:
-            file: greeting-ready.yaml
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: hello
-              data:
-                message: Hello from Chainsaw
-        - apply:
-            resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              metadata:
-                name: hello
-              spec:
-                message: Bonjour de Chainsaw
-        - assert:
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: hello
-              data:
-                message: Bonjour de Chainsaw
-        - assert:
-            resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              metadata:
-                name: hello
-              status:
-                observedGeneration: 2
-                (conditions[?type == 'Ready'] | [0].status): "True"
+        - script:
+            timeout: 2m
+            content: |
+              set -eu
+              for crd in clustercacheservers cacheservers cacheusers; do
+                kubectl wait --for=condition=Established --timeout=60s "crd/${crd}.cache.craftainer.dev"
+              done
 
-    - name: the webhook rejects a blank message
+    - name: a CacheServer gets its schema defaults
       try:
         - apply:
             resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheServer
               metadata:
-                name: blank
+                name: valkey
               spec:
-                message: "   "
+                host: valkey.example.svc
+                adminCredentialsSecretRef:
+                  name: valkey-admin
+        - assert:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheServer
+              metadata:
+                name: valkey
+              spec:
+                port: 6379
+                mode: Standalone
+
+    - name: the webhook rejects a proxy URL with credentials without echoing it
+      try:
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheServer
+              metadata:
+                name: bad-proxy
+              spec:
+                host: valkey.example.svc
+                proxyURL: http://user:hunter2@proxy:3128
+                adminCredentialsSecretRef:
+                  name: valkey-admin
             expect:
               - check:
                   ($error != null): true
-                  (contains($error, 'non-blank')): true
+                  (contains($error, 'must not carry credentials')): true
+                  (contains($error, 'hunter2')): false
 
-    - name: deleting a Greeting deletes its ConfigMap
-      try:
-        - delete:
-            ref:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              name: hello
-        - error:
-            resource:
-              apiVersion: v1
-              kind: ConfigMap
-              metadata:
-                name: hello
-
-    - name: deletionPolicy Retain keeps the ConfigMap
+    - name: a CacheUser gets its defaults and the schema rejects an unknown profile
       try:
         - apply:
             resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
               metadata:
-                name: keeper
+                name: session-store
               spec:
-                message: kept
-                deletionPolicy: Retain
+                serverRef: {kind: CacheServer, name: valkey}
         - assert:
             resource:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
               metadata:
-                name: keeper
-              status:
-                (conditions[?type == 'Ready'] | [0].status): "True"
-        - delete:
-            ref:
-              apiVersion: sample.craftainer.dev/v1alpha1
-              kind: Greeting
-              name: keeper
-        - assert:
+                name: session-store
+              spec:
+                profile: ReadWrite
+                channels: false
+        - apply:
             resource:
-              apiVersion: v1
-              kind: ConfigMap
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
               metadata:
-                name: keeper
-              data:
-                message: kept
-        - script:
-            content: |
-              set -eu
-              owners=$(kubectl get configmap keeper -n "$NAMESPACE" -o jsonpath='{.metadata.ownerReferences}')
-              test -z "$owners"
+                name: escape
+              spec:
+                serverRef: {kind: CacheServer, name: valkey}
+                profile: Admin
+            expect:
+              - check:
+                  ($error != null): true
+                  (contains($error, 'profile')): true
 
     - name: metrics need a token
       try:
@@ -170,10 +148,10 @@ spec:
             timeout: 5m
             content: |
               set -eu
-              svc="template-k8s-operator-controller-manager-metrics-service.${NAMESPACE}.svc:8443"
+              svc="operator-cache-controller-manager-metrics-service.${NAMESPACE}.svc:8443"
               kubectl create serviceaccount metrics-client -n "$NAMESPACE"
               kubectl create clusterrolebinding "e2e-metrics-${NAMESPACE}" \
-                --clusterrole=template-k8s-operator-metrics-reader --serviceaccount="${NAMESPACE}:metrics-client"
+                --clusterrole=operator-cache-metrics-reader --serviceaccount="${NAMESPACE}:metrics-client"
               token=$(kubectl create token metrics-client -n "$NAMESPACE")
               # curl runs in `default`: the test namespace enforces `restricted`.
               kubectl run "metrics-curl" -n default --rm -i --restart=Never \
@@ -183,7 +161,7 @@ spec:
                   echo anonymous=\$anon
                   test \"\$anon\" = 401 -o \"\$anon\" = 403
                   curl -ks -H 'Authorization: Bearer ${token}' https://${svc}/metrics > /tmp/m
-                  grep -q '^greeting_reconcile_total' /tmp/m
+                  grep -q -E '^(go|process)_' /tmp/m
                   echo authenticated metrics ok"
       cleanup:
         - script:

@@ -14,7 +14,7 @@ BUILD_ARGS = --build-arg APP_VERSION=$(RELEASE_VERSION) --build-arg APP_COMMIT=$
 
 # org.opencontainers.image.description and licence (GPL-3.0-only is the
 # template's; the instance picks its own, see docs/TEMPLATE.md).
-OCI_DESCRIPTION := A Kubernetes operator built from craftainer/template-k8s-operator
+OCI_DESCRIPTION := A Kubernetes operator that provisions Valkey and Redis ACL users on Valkey or Redis servers (cache.craftainer.dev)
 OCI_LICENSE := GPL-3.0-only
 
 # The coverage report is not published with a release of this template.

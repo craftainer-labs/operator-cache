@@ -5,32 +5,44 @@ metadata:
     alm-examples: '[]'
     capabilities: Basic Install
     categories: Developer Tools
-    description: A Kubernetes operator built from craftainer/template-k8s-operator.
+    description: A Kubernetes operator that provisions Valkey and Redis ACL users on Valkey or Redis servers (cache.craftainer.dev).
     # Pod Security `restricted` and a suggested install namespace for OLM v0
     # (OLM v1 installs into the ClusterExtension's namespace).
-    operatorframework.io/suggested-namespace: template-k8s-operator-system
+    operatorframework.io/suggested-namespace: operator-cache-system
     # OpenShift infrastructure features (EB-5): "disconnected" is true when
     # every image the operator runs is listed in spec.relatedImages (the
     # bundle step pins and lists the manager image). Add "proxy-aware" once
     # the operator honours HTTP(S)_PROXY/NO_PROXY, and "fips-compliant" for a
     # build with GOFIPS140 (see the Dockerfile) run with GODEBUG=fips140=on.
     operators.openshift.io/infrastructure-features: '["disconnected"]'
-    repository: https://github.com/craftainer/template-k8s-operator
-  name: template-k8s-operator.v0.0.0
+    repository: https://github.com/craftainer-labs/operator-cache
+  name: operator-cache.v0.0.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
-    - description: Greeting is the Schema for the greetings API.
-      displayName: Greeting
-      kind: Greeting
-      name: greetings.sample.craftainer.dev
+    - description: ClusterCacheServer is a cluster-scoped Valkey or Redis server that the namespaces in allowedNamespaces may claim from.
+      displayName: Cluster Cache Server
+      kind: ClusterCacheServer
+      name: clustercacheservers.cache.craftainer.dev
+      version: v1alpha1
+    - description: CacheServer is a Valkey or Redis server that only claims in its own namespace may use.
+      displayName: Cache Server
+      kind: CacheServer
+      name: cacheservers.cache.craftainer.dev
+      version: v1alpha1
+    - description: CacheUser is an ACL user of a Valkey or Redis server, limited to the tenant's key prefix, written to a binding Secret.
+      displayName: Cache User
+      kind: CacheUser
+      name: cacheusers.cache.craftainer.dev
       version: v1alpha1
   description: |-
-    A sample operator. Instances replace this text with what the operator does,
-    how to configure it and what it needs from the cluster.
-  displayName: Template K8s Operator
+    Provisions Valkey and Redis ACL users from Kubernetes resources. A
+    ClusterCacheServer or CacheServer names the server and its admin
+    credentials; a CacheUser in a team's namespace claims from it, with access
+    limited to the tenant's key prefix.
+  displayName: Cache Operator
   install:
     spec:
       deployments: null
@@ -51,7 +63,7 @@ spec:
   - craftainer
   links:
   - name: Source
-    url: https://github.com/craftainer/template-k8s-operator
+    url: https://github.com/craftainer-labs/operator-cache
   maintainers:
   - email: maintainers@example.com
     name: Maintainers

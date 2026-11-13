@@ -5,45 +5,37 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - ""
+  - cache.craftainer.dev
   resources:
-  - configmaps
+  - cacheservers
+  - clustercacheservers
   verbs:
-  - create
-  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cache.craftainer.dev
+  resources:
+  - cacheservers/status
+  - cacheusers/status
+  - clustercacheservers/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - cache.craftainer.dev
+  resources:
+  - cacheusers
+  verbs:
   - get
   - list
   - patch
   - update
   - watch
 - apiGroups:
-  - events.k8s.io
+  - cache.craftainer.dev
   resources:
-  - events
+  - cacheusers/finalizers
   verbs:
-  - create
-  - patch
-- apiGroups:
-  - sample.craftainer.dev
-  resources:
-  - greetings
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - sample.craftainer.dev
-  resources:
-  - greetings/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - sample.craftainer.dev
-  resources:
-  - greetings/status
-  verbs:
-  - get
-  - patch
   - update

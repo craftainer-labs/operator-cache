@@ -4,28 +4,48 @@ kind: ValidatingWebhookConfiguration
 metadata:
   annotations:
     {{- if .Values.certManager.enabled }}
-    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "template-k8s-operator.resourceName" (dict "suffix" "serving-cert" "context" $) }}
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "operator-cache.resourceName" (dict "suffix" "serving-cert" "context" $) }}
     {{- end }}
-  name: {{ include "template-k8s-operator.resourceName" (dict "suffix" "validating-webhook-configuration" "context" $) }}
+  name: {{ include "operator-cache.resourceName" (dict "suffix" "validating-webhook-configuration" "context" $) }}
 webhooks:
 - admissionReviewVersions:
   - v1
   clientConfig:
     service:
-      name: {{ include "template-k8s-operator.resourceName" (dict "suffix" "webhook-service" "context" $) }}
+      name: {{ include "operator-cache.resourceName" (dict "suffix" "webhook-service" "context" $) }}
       namespace: {{ .Release.Namespace }}
-      path: /validate-sample-craftainer-dev-v1alpha1-greeting
+      path: /validate-cache-craftainer-dev-v1alpha1-cacheserver
   failurePolicy: Fail
-  name: vgreeting-v1alpha1.kb.io
+  name: vcacheserver-v1alpha1.kb.io
   rules:
   - apiGroups:
-    - sample.craftainer.dev
+    - cache.craftainer.dev
     apiVersions:
     - v1alpha1
     operations:
     - CREATE
     - UPDATE
     resources:
-    - greetings
+    - cacheservers
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: {{ include "operator-cache.resourceName" (dict "suffix" "webhook-service" "context" $) }}
+      namespace: {{ .Release.Namespace }}
+      path: /validate-cache-craftainer-dev-v1alpha1-clustercacheserver
+  failurePolicy: Fail
+  name: vclustercacheserver-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - cache.craftainer.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - clustercacheservers
   sideEffects: None
 {{- end }}

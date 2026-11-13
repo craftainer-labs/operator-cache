@@ -22,7 +22,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	samplev1alpha1 "github.com/craftainer/template-k8s-operator/api/v1alpha1"
+	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 )
 
 // The envtest suite serves the webhook from a real manager and registers it
@@ -49,7 +49,7 @@ var _ = BeforeSuite(func() {
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
-	Expect(samplev1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(cachev1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
@@ -78,7 +78,8 @@ var _ = BeforeSuite(func() {
 		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	Expect(err).NotTo(HaveOccurred())
-	Expect(SetupGreetingWebhookWithManager(mgr)).To(Succeed())
+	Expect(SetupClusterCacheServerWebhookWithManager(mgr)).To(Succeed())
+	Expect(SetupCacheServerWebhookWithManager(mgr)).To(Succeed())
 
 	go func() {
 		defer GinkgoRecover()
