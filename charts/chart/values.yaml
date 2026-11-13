@@ -28,7 +28,7 @@ manager:
     ## is set. The release workflow publishes the chart with the digest of the
     ## signed image index filled in, so a released chart pins its image.
     registry: ghcr.io
-    repository: craftainer/operator-cache
+    repository: craftainer-labs/operator-cache
     ## Image digest, "sha256:<64 hex>"; wins over tag
     digest: ""
     ## Image tag (defaults to Chart.appVersion if not set and no digest)
