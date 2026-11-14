@@ -704,13 +704,14 @@ spec:
               p=$(sec keyPrefix)
               # Both passwords log in during the grace period, and both stay
               # inside the prefix.
-              out=$({ echo "$user"; echo "$new"; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk GET "${p}k" 2>&1)
-              printf %s "$out" | grep -qx hello-from-e2e
-              out=$({ echo "$user"; echo "$old"; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk GET "${p}k" 2>&1)
-              printf %s "$out" | grep -qx hello-from-e2e
+              out=$({ echo "$user"; echo "$new"; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk GET "${p}k" 2>&1 || true)
+              printf %s "$out" | grep -qx hello-from-e2e || { echo "the new password did not read the key: $out"; exit 1; }
+              out=$({ echo "$user"; echo "$old"; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk GET "${p}k" 2>&1 || true)
+              printf %s "$out" | grep -qx hello-from-e2e || { echo "the old password did not read the key: $out"; exit 1; }
               # The user has exactly the two passwords.
-              info=$(kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL GETUSER "$user" 2>&1)
-              test "$(printf %s "$info" | grep -cE '^[0-9a-f]{64}$')" = 2
+              info=$(kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL GETUSER "$user" 2>&1 || true)
+              n=$(printf %s "$info" | grep -cE '^[0-9a-f]{64}$' || true)
+              test "$n" = 2 || { echo "password hashes = $n; GETUSER said: $info"; exit 1; }
 
     - name: deleting a CacheUser removes its user and ends its sessions
       try:
