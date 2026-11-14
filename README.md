@@ -235,10 +235,10 @@ a name in `manager.extraEnv` that the chart sets itself):
 | --- | --- | --- |
 | `egressMode` | `strict` | `allow-private` is the usual choice when the server is an in-cluster Service or lives on a private address |
 | `defaultDataDeletionPolicy` | `Retain` | validated only: `CacheUser` is a credential kind with no `deletionPolicy` (see "Backup and restore") |
-| `global.imageRegistry` | empty | pull the image from a mirror (air-gapped, EB-5) |
+| `global.imageRegistry` | empty | pull the image from a mirror (air-gapped) |
 | `manager.image.digest` | set when released | image by digest; wins over `tag` |
-| `manager.extraEnv` | `[]` | extra environment, rendered after the chart's own (not `POD_NAMESPACE`, `EGRESS_MODE` or `DEFAULT_DATA_DELETION_POLICY`: the chart sets them, and the schema rejects them here), e.g. `NO_PROXY` or `HTTPS_PROXY` for the Kubernetes API client, or `SSL_CERT_FILE` with a bundle mounted through `manager.extraVolumes` and `manager.extraVolumeMounts` |
-| `manager.podSecurityContext`, `manager.securityContext` | restricted | non-root, seccomp `RuntimeDefault`, no privilege escalation, all capabilities dropped, read-only root filesystem (EB-10); the e2e installs into a `restricted` namespace as an arbitrary UID |
+| `manager.extraEnv` | `[]` | extra environment, rendered after the chart's own (not `POD_NAMESPACE`, `EGRESS_MODE` or `DEFAULT_DATA_DELETION_POLICY`: the chart sets them, and the schema rejects them here), e.g. `NO_PROXY` or `HTTPS_PROXY` for the Kubernetes API client (the Go client reads them; the operator's own code does not), or `SSL_CERT_FILE` with a bundle mounted through `manager.extraVolumes` and `manager.extraVolumeMounts` |
+| `manager.podSecurityContext`, `manager.securityContext` | restricted | non-root, seccomp `RuntimeDefault`, no privilege escalation, all capabilities dropped, read-only root filesystem; the e2e installs into a `restricted` namespace as an arbitrary UID |
 | `crd.keep` | `true` | keep the CRDs, and with them every claim, when the release is uninstalled |
 
 The operator makes no outbound call except to the Kubernetes API and to the
@@ -263,7 +263,7 @@ as a `CatalogSource` (OLM v0) or a `ClusterCatalog` (OLM v1) and subscribe or
 create a `ClusterExtension`.
 
 From a checkout, `make deploy` installs the kustomize manifests of
-`config/default`.
+`config/default`, which also need cert-manager.
 
 ## Backup and restore
 
@@ -293,8 +293,11 @@ password back: the server keeps only a hash. What it does on a restore:
 - **Restoring the server from an older copy:** users and their rules come back as
   they were. A password rotated since the copy is lost while the binding Secret
   still holds it, and the operator does not notice (it does not read passwords
-  back). A claim made after the copy has no user on the server. The operator
-  repairs the rules at the next reconcile. Rotate the claim (`craftainer.dev/rotate`) to issue a
+  back). A claim made after the copy has no user on the server, and a claim
+  whose recorded user is missing is created again: the server reports no such
+  user, so the operator makes it with a new password and rewrites the binding
+  Secret. A user that is still there has its rules repaired at the next
+  reconcile. Rotate the claim (`craftainer.dev/rotate`) to issue a
   new password and rewrite the binding Secret; consumers read the new Secret.
 - **Binding Secrets** are rewritten by the operator, so a restore of them is not
   required. A missing Secret, or one that does not hold the user's login, is
@@ -318,8 +321,10 @@ keys: the data a user wrote stays on the server.
   Secret gone, the claim cannot be cleaned up on the server: its finalizer stays,
   and it reports `Synced=False` ("the referenced server was not found") until the
   server object and its Secret are back.
-- Uninstalling the chart with `crd.keep=false`, or deleting a CRD, deletes every
-  claim of that kind and so every ACL user the operator made.
+- Delete the claims before you uninstall the chart. Their finalizers need the
+  running operator: with the operator gone first, claims stay `Terminating` and
+  their ACL users stay on the server. Deleting a CRD (or uninstalling with
+  `crd.keep=false`) deletes every claim of that kind, so the same order applies.
 
 ## Development
 
