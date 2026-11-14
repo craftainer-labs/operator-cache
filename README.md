@@ -56,11 +56,14 @@ For each `CacheUser` the operator makes **one ACL user** on the server named by
   `keyPrefix` (`<namespace>:`) and `sslrootcert` (the server's CA bundle).
 
 A **rotation** (the `craftainer.dev/rotate` annotation or `rotationPolicy`)
-keeps the password of the binding Secret and adds a new one (`resetpass
-#<hash of the current> ><new>`), writes the binding Secret, and after
+keeps every password the user has and adds a new one (`resetpass #<hash>...
+><new>`), writes the binding Secret, and after
 `gracePeriod` cuts the user back to the binding's password (`resetpass
-#<hash>`), which ends the old one. Retrying a rotation is safe: the password a
-failed attempt set is dropped. The retire first looks for the hash on the user
+#<hash>`), which ends the old one. Retrying a rotation is safe: the
+previous passwords come from the server, not from the Secret, so a retry after
+the Secret was written but before the rotation was recorded does not cut off
+consumers that still use the older password; the passwords of a failed attempt
+stay until the retire. The retire first looks for the hash on the user
 and, when it is not there, changes nothing and reports an error, so a user is
 never left without a password. A change of the profile or of `channels`
 reapplies the rules without `reset`, so the password and the sessions in use

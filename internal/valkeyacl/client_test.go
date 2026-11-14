@@ -436,3 +436,12 @@ func TestACancelledCallLeavesTheConnectionAlive(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotFound on a working connection", err)
 	}
 }
+
+func TestKeepOnly(t *testing.T) {
+	if got := strings.Join(valkeyacl.KeepOnly("a", "b"), " "); got != "resetpass #a #b" {
+		t.Errorf("KeepOnly(a, b) = %q", got)
+	}
+	if got := strings.Join(valkeyacl.KeepOnly(), " "); got != "resetpass" {
+		t.Errorf("KeepOnly() = %q", got)
+	}
+}

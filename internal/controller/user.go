@@ -415,12 +415,17 @@ func (e *userExternal) currentPassword(ctx context.Context) (string, error) {
 	return string(s.Data["password"]), nil
 }
 
-// RotateBegin implements lifecycle.Rotator: the user keeps the password of the
-// binding Secret and gets a new one beside it ("resetpass" first, then the hash
-// of the current one and the new one), so the old credentials work through the
-// grace period. A retry, whatever crashed before, gives the same state with a
-// new password: the one a failed attempt set is dropped, and nobody was given
-// it. With no binding Secret there is no current password to keep.
+// RotateBegin implements lifecycle.Rotator: the user keeps every password it has
+// beside a new one, so every credential a consumer may still hold works through
+// the grace period. What is "previous" comes from the server, not from the
+// binding Secret: the lifecycle writes the Secret before it marks it and before
+// it records the rotation, so a retry after a crash between those steps finds
+// the Secret holding the new password of the first attempt. Keeping only the
+// Secret's password would drop the one the consumers still use. The passwords
+// of a failed attempt that nobody was given stay until RotateFinish, which keeps
+// only the password of the Secret. With no usable binding Secret (missing, or of
+// another user) there is no credential to protect: the user gets the new password
+// alone.
 func (e *userExternal) RotateBegin(ctx context.Context, _ cachev1alpha1.CacheUserSpec, _ userState, st lifecycle.RotationState) (binding.Data, lifecycle.Generation, error) {
 	data, err := e.begin(ctx)
 	if err != nil {
@@ -441,7 +446,16 @@ func (e *userExternal) begin(ctx context.Context) (binding.Data, error) {
 	password := newPassword()
 	var rules []string
 	if current != "" {
-		rules = valkeyacl.KeepOnly(valkeyacl.HashPassword(current))
+		info, err := v.GetUser(ctx, e.name)
+		if err != nil && !errors.Is(err, valkeyacl.ErrNotFound) {
+			return nil, err
+		}
+		// "resetpass" then every hash the user has, so what stays does not depend
+		// on the order of the commands. A password the server does not list is
+		// not reinstated from the Secret: that would let whoever can write the
+		// Secret choose a password for the user.
+		hashes := info.PasswordHashes
+		rules = valkeyacl.KeepOnly(hashes...)
 	}
 	if err := v.SetUser(ctx, e.name, append(rules, valkeyacl.AddPassword(password))...); err != nil {
 		return nil, err

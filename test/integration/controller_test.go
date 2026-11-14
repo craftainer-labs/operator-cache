@@ -153,18 +153,31 @@ func TestControllerRotation(t *testing.T) {
 	newClient := loginOK(t, s, name, newPW)
 	allowed(t, oldClient, "SET", ns+":k", "v")
 
-	// A retry (the Secret still holds the old password) drops the password a
-	// failed attempt set, and keeps the old one.
+	// A retry before the Secret was written (it still holds the old password)
+	// keeps every password beside another new one: the first attempt's stays until
+	// RotateFinish.
 	again, _, err := i.RotateBegin(bg, readWrite, obs.Current, lifecycle.RotationState{Sequence: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.login(name, newPW); err == nil {
-		t.Fatal("the password of the failed attempt still logs in")
+	loginOK(t, s, name, newPW)
+	loginOK(t, s, name, oldPW)
+	againPW := string(again["password"])
+	loginOK(t, s, name, againPW)
+
+	// A retry after the Secret was written but before it was marked: the Secret
+	// holds the first attempt's password. The old password, which the consumers
+	// may still hold, must still log in.
+	i.Binding = next
+	last, _, err := i.RotateBegin(bg, readWrite, obs.Current, lifecycle.RotationState{Sequence: 0})
+	if err != nil {
+		t.Fatal(err)
 	}
 	loginOK(t, s, name, oldPW)
-	newPW = string(again["password"])
 	loginOK(t, s, name, newPW)
+	newPW = string(last["password"])
+	loginOK(t, s, name, newPW)
+	again = last
 
 	// RotateFinish with the new password in the Secret ends the old one.
 	i.Binding = again

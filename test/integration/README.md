@@ -32,7 +32,7 @@ is server-side, so this lane checks what that fake only claims, against Valkey:
   `CacheUser` to the real server and an in-memory binding Secret): create, with a
   real login confined to its prefix; a change of the profile that keeps the
   password; a widened user noticed and repaired; a rotation (both passwords log
-  in, a retry drops the failed attempt's password, the retire ends the old one,
+  in, a retry, also after the Secret was written, keeps the passwords in use, the retire ends the old one,
   and a retire with a password the server does not list changes nothing); a
   create that crashed and is finished; a user without a record refused as a
   `NameCollision` and left unchanged; delete ending the user and its sessions.

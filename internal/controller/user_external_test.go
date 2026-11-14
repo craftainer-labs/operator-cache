@@ -334,13 +334,40 @@ func TestUserRotateBegin(t *testing.T) {
 	}
 	v.want(t, "SetUser "+extName+" resetpass #"+valkeyacl.HashPassword(pw)+" >"+next)
 
-	// A retry gives the same state with another new password: the one a failed
-	// attempt set is dropped.
+	// A retry before the Secret was written (it still holds the old password)
+	// keeps every password the user has beside another new one: the password of
+	// the failed attempt stays until RotateFinish, which keeps only the Secret's.
 	bindingWith(e, extName, pw)
 	data, _, err = e.RotateBegin(ctx, extSpec, userState{}, st)
 	again := string(data["password"])
-	if u := v.user(extName); err != nil || again == next || len(u.hashes) != 2 || u.hasPassword(next) || !u.hasPassword(again) || !u.hasPassword(pw) {
+	if u := v.user(extName); err != nil || again == next || len(u.hashes) != 3 || !u.hasPassword(next) || !u.hasPassword(again) || !u.hasPassword(pw) {
 		t.Errorf("retry: %v, passwords %d", err, len(v.user(extName).hashes))
+	}
+	v.want(t, "SetUser "+extName+" resetpass #")
+
+	// A retry after the Secret was written but before it was marked: the Secret
+	// holds the password of the first attempt, and the one the consumers may still
+	// hold is only on the server. Nothing is dropped.
+	e, v, pw = created(t)
+	bindingWith(e, extName, pw)
+	data, _, err = e.RotateBegin(ctx, extSpec, userState{}, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := string(data["password"])
+	bindingWith(e, extName, first)
+	data, _, err = e.RotateBegin(ctx, extSpec, userState{}, st)
+	second := string(data["password"])
+	if u := v.user(extName); err != nil || len(u.hashes) != 3 || !u.hasPassword(pw) || !u.hasPassword(first) || !u.hasPassword(second) {
+		t.Fatalf("retry after the write: %v, passwords %d", err, len(v.user(extName).hashes))
+	}
+	// The rotation then finishes with the Secret holding the last one.
+	bindingWith(e, extName, second)
+	if err := e.RotateFinish(ctx, extSpec, userState{}, st); err != nil {
+		t.Fatal(err)
+	}
+	if u := v.user(extName); len(u.hashes) != 1 || !u.hasPassword(second) {
+		t.Errorf("after RotateFinish: %d passwords", len(u.hashes))
 	}
 
 	// With no binding Secret (or one of another user) there is no current password:
@@ -368,6 +395,12 @@ func TestUserRotateBegin(t *testing.T) {
 	if _, _, err := e.RotateBegin(ctx, extSpec, userState{}, st); !errors.Is(err, errServer) {
 		t.Errorf("binding: %v", err)
 	}
+	bindingWith(e, extName, "p")
+	v.fail["GetUser"] = errServer
+	if _, _, err := e.RotateBegin(ctx, extSpec, userState{}, st); !errors.Is(err, errServer) {
+		t.Errorf("GetUser: %v", err)
+	}
+	v.fail = map[string]error{}
 	e.binding = func(context.Context) (*corev1.Secret, error) { return nil, nil }
 	v.fail["SetUser"] = errServer
 	if _, _, err := e.RotateBegin(ctx, extSpec, userState{}, st); !errors.Is(err, errServer) {
