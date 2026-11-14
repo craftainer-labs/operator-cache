@@ -57,8 +57,10 @@ func TestVersionFallsBackToHelloWhenInfoNamesNone(t *testing.T) {
 // A server that gives no usable version is still healthy: "" and no error.
 func TestVersionIsEmptyWhenNoSourceAnswers(t *testing.T) {
 	f := newFake(t)
+	// The client's own HELLO happens at connect, so the refusals come after it.
+	a := connect(t, f)
 	f.with(func(f *fake) { f.denied = map[string]bool{"INFO": true, "HELLO": true} })
-	got, err := connect(t, f).Version(context.Background())
+	got, err := a.Version(context.Background())
 	if err != nil || got != "" {
 		t.Fatalf("%q, %v", got, err)
 	}
@@ -76,8 +78,9 @@ func TestVersionRejectsOddAndOverlongValues(t *testing.T) {
 		"empty":     "valkey_version:\r\n",
 	} {
 		f := newFake(t)
+		a := connect(t, f)
 		f.with(func(f *fake) { f.infoText = text; f.denied = map[string]bool{"HELLO": true} })
-		got, err := connect(t, f).Version(context.Background())
+		got, err := a.Version(context.Background())
 		if err != nil || got != "" {
 			t.Errorf("%s: %q, %v", name, got, err)
 		}
@@ -161,8 +164,9 @@ func TestVersionIgnoresAnswersOfTheWrongShape(t *testing.T) {
 		"hello has no version": {"INFO": ":1\r\n", "HELLO": list(bulk("server"), bulk("valkey"))},
 	} {
 		f := newFake(t)
+		a := connect(t, f)
 		f.with(func(f *fake) { f.raw = raw })
-		got, err := connect(t, f).Version(context.Background())
+		got, err := a.Version(context.Background())
 		want := ""
 		if name == "info is a number" {
 			want = "9.1.2"
