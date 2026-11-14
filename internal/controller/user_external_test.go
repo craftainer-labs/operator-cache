@@ -244,25 +244,10 @@ func TestUserCreate(t *testing.T) {
 	if _, err := e.Create(ctx, extSpec); !errors.Is(err, refused) || e.claim.GetExternalID() != createIssued {
 		t.Errorf("withdraw whose write failed: %v, externalId %q", err, e.claim.GetExternalID())
 	}
-	// A denied command is a refusal too.
-	v = newMemValkey()
-	e = userExt(t, v)
-	v.fail["SetUser"] = valkeyacl.ErrAuth
-	e.persist = func(context.Context) error { return nil }
-	if _, err := e.Create(ctx, extSpec); !errors.Is(err, valkeyacl.ErrAuth) || e.claim.GetExternalID() != "" {
-		t.Errorf("denied create: %v, externalId %q", err, e.claim.GetExternalID())
-	}
-	// A server error that is neither (it may be a failover) keeps the record: the
-	// server cannot say.
-	v = newMemValkey()
-	e = userExt(t, v)
-	v.fail["SetUser"] = valkeyacl.ErrServer
-	e.persist = func(context.Context) error { return nil }
-	if _, err := e.Create(ctx, extSpec); !errors.Is(err, valkeyacl.ErrServer) || e.claim.GetExternalID() != createIssued {
-		t.Errorf("server error: %v, externalId %q", err, e.claim.GetExternalID())
-	}
-	// A timeout or a lost connection may have been applied: the record stays.
-	for _, cause := range []error{valkeyacl.ErrTimeout, valkeyacl.ErrUnavailable} {
+	// Any other failure may have been applied or leaves the server unable to say
+	// (a failover, a timeout, a lost connection, a denied command): the record
+	// stays.
+	for _, cause := range []error{valkeyacl.ErrServer, valkeyacl.ErrAuth, valkeyacl.ErrTimeout, valkeyacl.ErrUnavailable} {
 		v = newMemValkey()
 		e = userExt(t, v)
 		v.fail["SetUser"] = cause

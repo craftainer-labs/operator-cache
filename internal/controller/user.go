@@ -348,16 +348,18 @@ func (e *userExternal) create(ctx context.Context, spec cachev1alpha1.CacheUserS
 }
 
 // withdraw takes back the record of a create that failed, when the failure is
-// a refusal (an invalid rule or a denied command: the server answered, and ACL
-// SETUSER changes nothing when it refuses) and the server shows that no user was made: the claim then
+// a refusal of the rules (the server answered ERR; ACL SETUSER changes nothing
+// when it refuses) and the server shows that no user was made: the claim then
 // owns nothing, and a user that someone else makes under the name later is
 // refused as a collision instead of being taken for this claim's. After a
 // timeout or a lost connection the command may still be applied, so the record
-// stays: it is the only proof that a user of that name is ours. A failure of
+// stays, and so it does after any other server error (READONLY, LOADING, a
+// failover) or a denied command: those are not worth the risk of clearing the
+// only proof that a user of that name is ours. A failure of
 // the write is not reported; the record then stays in step with the stored one
 // and the next reconcile goes through Create again.
 func (e *userExternal) withdraw(ctx context.Context, v Valkey, cause error) {
-	if !errors.Is(cause, valkeyacl.ErrInvalid) && !errors.Is(cause, valkeyacl.ErrAuth) {
+	if !errors.Is(cause, valkeyacl.ErrInvalid) {
 		return
 	}
 	if _, err := v.GetUser(ctx, e.name); !errors.Is(err, valkeyacl.ErrNotFound) {
@@ -741,6 +743,10 @@ func (e *userExternal) begin(ctx context.Context) (binding.Data, error) {
 		// on the order of the commands. A password the server does not list is
 		// not reinstated from the Secret: that would let whoever can write the
 		// Secret choose a password for the user.
+		// Nothing bounds the passwords a rotation that keeps failing leaves: the
+		// server does not promise an order for them, so trimming the "oldest" could
+		// cut off the credential in use. Retries back off, and the retire removes
+		// them all but the Secret's.
 		hashes := info.PasswordHashes
 		rules = valkeyacl.KeepOnly(hashes...)
 	}
