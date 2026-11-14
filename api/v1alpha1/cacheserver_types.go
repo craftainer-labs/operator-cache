@@ -51,6 +51,9 @@ type CacheServerList struct {
 // GetCommon returns the settings every server kind shares.
 func (s *CacheServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
 
+// GetServerStatus returns the status the probe writes (probe.Server).
+func (s *CacheServer) GetServerStatus() *common.ServerStatus { return &s.Status }
+
 // GetEndpoint returns the server's URL, rediss://host:port.
 func (s *CacheServer) GetEndpoint() string { return s.Spec.Endpoint() }
 

@@ -2,6 +2,7 @@ package valkeyacl_test
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -100,6 +101,15 @@ type fake struct {
 	failWith string
 	// garbage is the answer to send to GETUSER and DELUSER instead of the real one.
 	garbage string
+	// infoText and helloVersion replace the version INFO and HELLO report;
+	// denied is a command (INFO or HELLO) the admin's ACL refuses with NOPERM,
+	// and dropOn one the server answers by closing the connection.
+	infoText     string
+	helloVersion string
+	denied       map[string]bool
+	dropOn       string
+	// raw is a reply sent for a command (INFO or HELLO) instead of the real one.
+	raw map[string]string
 	// dropAfter closes the connection after that many ACL commands; 0 never.
 	dropAfter int
 }
@@ -190,6 +200,9 @@ func (f *fake) serve(c net.Conn) {
 		}
 		cmd := strings.ToUpper(args[0])
 		var reply string
+		f.mu.Lock()
+		dropOn, denied, helloVersion, infoText, raw := f.dropOn, f.denied[cmd], f.helloVersion, f.infoText, f.raw[cmd]
+		f.mu.Unlock()
 		switch {
 		case cmd == "AUTH":
 			if len(args) == 3 && args[1] == "admin" && args[2] == f.adminPW {
@@ -200,11 +213,17 @@ func (f *fake) serve(c net.Conn) {
 			}
 		case loggedIn == "":
 			reply = "-NOAUTH Authentication required.\r\n"
+		case dropOn == cmd:
+			return
+		case raw != "":
+			reply = raw
+		case denied:
+			reply = "-NOPERM User admin has no permissions to run the '" + strings.ToLower(cmd) + "' command\r\n"
 		case cmd == "HELLO":
-			reply = list(bulk("server"), bulk("valkey"), bulk("version"), bulk("9.1.2"), bulk("proto"), ":2\r\n",
+			reply = list(bulk("server"), bulk("valkey"), bulk("version"), bulk(cmp.Or(helloVersion, "9.1.2")), bulk("proto"), ":2\r\n",
 				bulk("id"), ":1\r\n", bulk("mode"), bulk("standalone"), bulk("role"), bulk("master"), bulk("modules"), "*0\r\n")
 		case cmd == "INFO":
-			reply = bulk("# Server\r\nvalkey_version:9.1.2\r\n")
+			reply = bulk(cmp.Or(infoText, "# Server\r\nredis_version:7.2.4\r\nvalkey_version:9.1.2\r\n"))
 		case cmd == "ACL":
 			f.mu.Lock()
 			f.log = append(f.log, strings.Join(args, " "))

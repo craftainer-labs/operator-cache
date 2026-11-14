@@ -286,6 +286,54 @@ func TestTLSIsVerified(t *testing.T) {
 	})
 }
 
+// The health probe is one connection of its own: it logs in and reads the
+// server's version (INFO server's valkey_version), and a failed one names a
+// kind of error, never the host or the password.
+func TestProbe(t *testing.T) {
+	s := load(t)
+
+	got, err := valkeyacl.Probe(bg, s.config())
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if got == "" || strings.ContainsAny(got, " \t\r\n") || got[0] < '0' || got[0] > '9' {
+		t.Errorf("version = %q, want the bare Valkey version", got)
+	}
+	t.Logf("Valkey reports version %q", got)
+
+	// The version read of the connection itself, which the probe wraps.
+	a, _ := admin(t)
+	if v, err := a.Version(bg); err != nil || v != got {
+		t.Errorf("Version = %q, %v; want %q", v, err, got)
+	}
+
+	// A wrong password and an unknown admin are refused at the login; the error
+	// leaks neither the password nor the host.
+	for what, mutate := range map[string]func(*valkeyacl.Config){
+		"wrong password": func(c *valkeyacl.Config) { c.Password = "wrong-password-0123" },
+		"unknown admin":  func(c *valkeyacl.Config) { c.Username = "nobody-0123" },
+	} {
+		cfg := s.config()
+		mutate(&cfg)
+		_, err := valkeyacl.Probe(bg, cfg)
+		if !errors.Is(err, valkeyacl.ErrAuth) {
+			t.Fatalf("%s: %v, want ErrAuth", what, err)
+		}
+		for _, secret := range []string{"wrong-password-0123", s.password, s.host} {
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("%s: the error leaks %q: %v", what, secret, err)
+			}
+		}
+	}
+
+	// The certificate is verified for the probe as for every other call.
+	cfg := s.config()
+	cfg.CA = nil
+	if _, err := valkeyacl.Probe(bg, cfg); !errors.Is(err, valkeyacl.ErrUnavailable) {
+		t.Errorf("no CA bundle: %v, want ErrUnavailable", err)
+	}
+}
+
 func TestUserLifecycle(t *testing.T) {
 	a, _ := admin(t)
 	name := "it-" + random(t)
