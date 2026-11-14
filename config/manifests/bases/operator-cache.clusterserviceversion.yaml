@@ -12,7 +12,8 @@ metadata:
     # OpenShift infrastructure features (EB-5): "disconnected" is true when
     # every image the operator runs is listed in spec.relatedImages (the
     # bundle step pins and lists the manager image). "proxy-aware" and
-    # "fips-compliant" are "false" in the features.operators.openshift.io keys below: the operator reads no HTTP(S)_PROXY
+    # "fips-compliant" are "false" in the features.operators.openshift.io keys
+    # below: the operator reads no HTTP(S)_PROXY
     # (set both once it does), and the build has no GOFIPS140 run with
     # GODEBUG=fips140=on (see the Dockerfile).
     operators.openshift.io/infrastructure-features: '["disconnected"]'
