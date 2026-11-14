@@ -919,6 +919,7 @@ spec:
               out=$({ echo "$name"; echo e2e-foreign; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk SET foreign:k kept 2>&1)
               printf %s "$out" | grep -qx OK || { echo "the foreign user was deleted or changed: $out"; exit 1; }
               adm ACL GETUSER "$name" | grep -qF '~foreign:*' || { echo "the foreign user's rules changed"; exit 1; }
+              adm ACL DELUSER "$name" | grep -qx 1
       cleanup:
         - script:
             content: |
