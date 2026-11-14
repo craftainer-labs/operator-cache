@@ -36,10 +36,6 @@ import (
 // while the claim has no record is someone else's and is never touched.
 const createIssued = "create-issued"
 
-// maxPasswords bounds the passwords a user has at once, which a rotation that
-// keeps failing could otherwise grow without limit.
-const maxPasswords = 16
-
 // UserReconciler reconciles CacheUser claims (a credential kind).
 type UserReconciler struct{ Config }
 
@@ -352,8 +348,8 @@ func (e *userExternal) create(ctx context.Context, spec cachev1alpha1.CacheUserS
 }
 
 // withdraw takes back the record of a create that failed, when the failure is
-// a refusal (the server answered with an error, and ACL SETUSER changes nothing
-// when it refuses) and the server shows that no user was made: the claim then
+// a refusal (an invalid rule or a denied command: the server answered, and ACL
+// SETUSER changes nothing when it refuses) and the server shows that no user was made: the claim then
 // owns nothing, and a user that someone else makes under the name later is
 // refused as a collision instead of being taken for this claim's. After a
 // timeout or a lost connection the command may still be applied, so the record
@@ -361,7 +357,7 @@ func (e *userExternal) create(ctx context.Context, spec cachev1alpha1.CacheUserS
 // the write is not reported; the record then stays in step with the stored one
 // and the next reconcile goes through Create again.
 func (e *userExternal) withdraw(ctx context.Context, v Valkey, cause error) {
-	if !errors.Is(cause, valkeyacl.ErrInvalid) && !errors.Is(cause, valkeyacl.ErrServer) && !errors.Is(cause, valkeyacl.ErrAuth) {
+	if !errors.Is(cause, valkeyacl.ErrInvalid) && !errors.Is(cause, valkeyacl.ErrAuth) {
 		return
 	}
 	if _, err := v.GetUser(ctx, e.name); !errors.Is(err, valkeyacl.ErrNotFound) {
@@ -746,19 +742,6 @@ func (e *userExternal) begin(ctx context.Context) (binding.Data, error) {
 		// not reinstated from the Secret: that would let whoever can write the
 		// Secret choose a password for the user.
 		hashes := info.PasswordHashes
-		// A retry that never gets as far as the Secret adds a password nobody
-		// has; the oldest are dropped past a bound (the server lists them in the
-		// order they were added), the Secret's own one never.
-		if drop := len(hashes) - maxPasswords + 1; drop > 0 {
-			keep := valkeyacl.HashPassword(current)
-			hashes = slices.DeleteFunc(slices.Clone(hashes), func(h string) bool {
-				if drop > 0 && h != keep {
-					drop--
-					return true
-				}
-				return false
-			})
-		}
 		rules = valkeyacl.KeepOnly(hashes...)
 	}
 	if err := v.SetUser(ctx, e.name, append(rules, valkeyacl.AddPassword(password))...); err != nil {
