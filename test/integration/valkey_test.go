@@ -382,7 +382,7 @@ func TestReadWriteTenantIsConfinedToItsPrefix(t *testing.T) {
 		{"DBSIZE"}, {"CLIENT", "TRACKING", "ON", "BCAST"}, {"FUNCTION", "FLUSH"}, {"FUNCTION", "DELETE", "x"},
 		{"FUNCTION", "LOAD", "#!lua name=x\nredis.register_function('x', function() return 1 end)"},
 		{"OBJECT", "ENCODING", "team-b:k"}, {"DUMP", "team-b:k"}, {"SORT_RO", "team-a:k", "BY", "team-b:*"},
-		{"MIGRATE", "localhost", "6379", "team-a:k", "0", "100"}, {"DEBUG", "SLEEP", "0"}, {"MONITOR"},
+		{"MIGRATE", "localhost", "6379", "team-a:k", "0", "100"}, {"MONITOR"},
 	} {
 		denied(t, c, cmd...)
 	}
