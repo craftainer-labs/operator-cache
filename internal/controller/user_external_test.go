@@ -217,6 +217,26 @@ func TestUserCreate(t *testing.T) {
 			t.Errorf("%s: %v", method, err)
 		}
 	}
+	// A create that failed with no user made withdraws its record, so a user
+	// made under the name later is a collision. Where the user exists, the record
+	// stays.
+	v = newMemValkey()
+	e = userExt(t, v)
+	v.fail["SetUser"] = errServer
+	persisted := 0
+	e.persist = func(context.Context) error { persisted++; return nil }
+	if _, err := e.Create(ctx, extSpec); !errors.Is(err, errServer) || e.claim.GetExternalID() != "" || persisted != 2 {
+		t.Errorf("failed create: %v, externalId %q, %d persists", err, e.claim.GetExternalID(), persisted)
+	}
+	v = newMemValkey()
+	v.users[extName] = &memUser{commands: "-@all"}
+	e = userExt(t, v)
+	e.claim.SetExternalID(createIssued)
+	v.fail["SetUser"] = errServer
+	e.persist = func(context.Context) error { return nil }
+	if _, err := e.Create(ctx, extSpec); !errors.Is(err, errServer) || e.claim.GetExternalID() != createIssued {
+		t.Errorf("failed create of an existing user: %v, externalId %q", err, e.claim.GetExternalID())
+	}
 	v = newMemValkey()
 	e = userExt(t, v)
 	e.persist = func(context.Context) error { return errServer }

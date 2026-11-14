@@ -340,10 +340,26 @@ func (e *userExternal) create(ctx context.Context, spec cachev1alpha1.CacheUserS
 	// own), it is off, without passwords, keys, channels and commands before the
 	// rules apply.
 	if err := v.SetUser(ctx, e.name, append([]string{"reset", valkeyacl.AddPassword(password)}, rules...)...); err != nil {
+		e.withdraw(ctx, v)
 		return nil, err
 	}
 	e.claim.SetExternalID(e.name)
 	return e.data(password), nil
+}
+
+// withdraw takes back the record of a create that failed, when the server shows
+// that no user was made: the claim then owns nothing, and a user that someone
+// else makes under the name later is refused as a collision instead of being
+// taken for this claim's. When the server cannot say (or the user exists, as when
+// the command's answer was lost), the record stays: it is the only proof that a
+// user of that name is ours. A failure here is not reported; the next reconcile
+// goes through Create again.
+func (e *userExternal) withdraw(ctx context.Context, v Valkey) {
+	if _, err := v.GetUser(ctx, e.name); !errors.Is(err, valkeyacl.ErrNotFound) {
+		return
+	}
+	e.claim.SetExternalID("")
+	_ = e.persist(ctx)
 }
 
 // Update implements lifecycle.External: the rules follow the spec, without

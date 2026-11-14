@@ -109,6 +109,9 @@ func (c *ServerCache) Forget(key string) {
 
 // Len is the number of cached servers.
 func (c *ServerCache) Len() int {
+	if c == nil {
+		return 0
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)

@@ -806,9 +806,11 @@ spec:
               # applies the deletion at once, the retry only covers the claim's
               # deletion finishing).
               deadline=$(( $(date +%s) + 60 ))
-              while kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk PING < "${TMPDIR:-/tmp}/e2e-reader-login-$NAMESPACE" 2>&1 | grep -q PONG; do
+              # The refusal itself is the positive signal: a failed exec prints
+              # neither PONG nor WRONGPASS and does not pass.
+              until kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk PING < "${TMPDIR:-/tmp}/e2e-reader-login-$NAMESPACE" 2>&1 | grep -q WRONGPASS; do
                 if [ "$(date +%s)" -ge "$deadline" ]; then
-                  echo "the deleted login still connects"
+                  echo "the deleted login is not refused"
                   exit 1
                 fi
                 sleep 2
@@ -826,6 +828,7 @@ spec:
               # The user is gone from the server, whatever the operator's
               # default deletionPolicy (Retain): a credential kind has none.
               users=$(kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL LIST 2>&1)
+              printf %s "$users" | grep -qF "user admin " || { echo "ACL LIST did not answer: $users"; exit 1; }
               if printf %s "$users" | grep -qF "user ${name} "; then
                 echo "the deleted claim's user is still on the server"
                 exit 1
@@ -871,7 +874,9 @@ spec:
               test -n "$name"
               # The claim removed its own user. Someone else now makes a user of
               # the same name; the claim has no record of it.
-              if adm ACL LIST | grep -qF "user ${name} "; then
+              list=$(adm ACL LIST)
+              printf %s "$list" | grep -qF "user admin " || { echo "ACL LIST did not answer: $list"; exit 1; }
+              if printf %s "$list" | grep -qF "user ${name} "; then
                 echo "the claim's own user was not deleted"
                 exit 1
               fi
