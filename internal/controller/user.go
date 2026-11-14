@@ -36,6 +36,10 @@ import (
 // while the claim has no record is someone else's and is never touched.
 const createIssued = "create-issued"
 
+// maxPasswords bounds the passwords a user has at once, which a rotation that
+// keeps failing could otherwise grow without limit.
+const maxPasswords = 16
+
 // UserReconciler reconciles CacheUser claims (a credential kind).
 type UserReconciler struct{ Config }
 
@@ -340,7 +344,278 @@ func (e *userExternal) create(ctx context.Context, spec cachev1alpha1.CacheUserS
 	// own), it is off, without passwords, keys, channels and commands before the
 	// rules apply.
 	if err := v.SetUser(ctx, e.name, append([]string{"reset", valkeyacl.AddPassword(password)}, rules...)...); err != nil {
-		e.withdraw(ctx, v)
+		e.withdraw(ctx, v, err)
+		return nil, err
+	}
+	e.claim.SetExternalID(e.name)
+	return e.data(password), nil
+}
+
+// withdraw takes back the record of a create that failed, when the failure is
+// a refusal (the server answered with an error, and ACL SETUSER changes nothing
+// when it refuses) and the server shows that no user was made: the claim then
+// owns nothing, and a user that someone else makes under the name later is
+// refused as a collision instead of being taken for this claim's. After a
+// timeout or a lost connection the command may still be applied, so the record
+// stays: it is the only proof that a user of that name is ours. A failure of
+// the write is not reported; the record then stays in step with the stored one
+// and the next reconcile goes through Create again.
+func (e *userExternal) withdraw(ctx context.Context, v Valkey, cause error) {
+	if !errors.Is(cause, valkeyacl.ErrInvalid) && !errors.Is(cause, valkeyacl.ErrServer) && !errors.Is(cause, valkeyacl.ErrAuth) {
+		return
+	}
+	if _, err := v.GetUser(ctx, e.name); !errors.Is(err, valkeyacl.ErrNotFound) {
+		return
+	}
+	e.claim.SetExternalID("")
+	if err := e.persist(ctx); err != nil {
+		e.claim.SetExternalID(createIssued)
+	}
+}
+
+// Update implements lifecycle.External; it is never called, because nothing exists.
+func (nothingMade) Update(context.Context, cachev1alpha1.CacheUserSpec, userState) (binding.Data, error) {
+	return nil, nil
+}
+
+// Delete implements lifecycle.External: there is nothing to delete.
+func (nothingMade) Delete(context.Context, userState) error { return nil }
+
+// bindingSecret is the claim's binding Secret, nil when there is none. It reads
+// through the API reader, because the cache only holds Secrets with the
+// operator's label.
+func (r *UserReconciler) bindingSecret(ctx context.Context, u *cachev1alpha1.CacheUser) (*corev1.Secret, error) {
+	var s corev1.Secret
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: u.Namespace, Name: u.GetBindingSecretName()}, &s)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	return &s, err
+}
+
+// serverRefIndex indexes CacheUsers by the server they name, as kind/name.
+const serverRefIndex = ".spec.serverRef"
+
+func indexServerRef(o client.Object) []string {
+	ref := o.(*cachev1alpha1.CacheUser).Spec.ServerRef
+	return []string{ref.Kind + "/" + ref.Name}
+}
+
+// usersOfServer maps a server of a kind to the CacheUsers that name it, so a
+// user that waits for its server, or whose server changed (its address), is
+// reconciled when the server does. A namespaced server serves its own namespace
+// only.
+func usersOfServer(c client.Reader, kind string) handler.MapFunc {
+	return func(ctx context.Context, o client.Object) []reconcile.Request {
+		opts := []client.ListOption{client.MatchingFields{serverRefIndex: kind + "/" + o.GetName()}}
+		if o.GetNamespace() != "" {
+			opts = append(opts, client.InNamespace(o.GetNamespace()))
+		}
+		var list cachev1alpha1.CacheUserList
+		if err := c.List(ctx, &list, opts...); err != nil {
+			log.FromContext(ctx).Error(err, "cannot list the users of a server", "kind", kind, "server", o.GetName())
+			return nil
+		}
+		reqs := make([]reconcile.Request, len(list.Items))
+		for i := range list.Items {
+			reqs[i] = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])}
+		}
+		return reqs
+	}
+}
+
+// conditionsOf returns the status conditions of a server of either kind.
+func conditionsOf(o client.Object) []metav1.Condition {
+	switch s := o.(type) {
+	case *cachev1alpha1.ClusterCacheServer:
+		return s.Status.Conditions
+	case *cachev1alpha1.CacheServer:
+		return s.Status.Conditions
+	}
+	return nil
+}
+
+// serverChanged lets a server's creation and deletion through, and an update
+// only when its spec changed or it went from Ready to not Ready or back: the
+// status writes of a health probe would otherwise reconcile every user of the
+// server at every probe.
+var serverChanged = predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
+	return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() ||
+		serverNotReady(conditionsOf(e.ObjectOld)) != serverNotReady(conditionsOf(e.ObjectNew))
+}}
+
+// SetupWithManager registers the controller. It also watches the binding
+// Secrets it owns (every change, so an edited Secret is repaired) and the
+// servers its claims name (so a user that waits for its server goes on when the
+// server exists or is Ready). Only the claims themselves pass the lifecycle
+// filter.
+func (r *UserReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &cachev1alpha1.CacheUser{}, serverRefIndex, indexServerRef); err != nil {
+		return err
+	}
+	reader := mgr.GetClient()
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&cachev1alpha1.CacheUser{}, builder.WithPredicates(lifecycle.Predicates())).
+		Owns(&corev1.Secret{}).
+		Watches(&cachev1alpha1.ClusterCacheServer{},
+			handler.EnqueueRequestsFromMapFunc(usersOfServer(reader, kindClusterCacheServer)),
+			builder.WithPredicates(serverChanged)).
+		Watches(&cachev1alpha1.CacheServer{},
+			handler.EnqueueRequestsFromMapFunc(usersOfServer(reader, kindCacheServer)),
+			builder.WithPredicates(serverChanged)).
+		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: max(1, r.MaxConcurrentReconciles)}).
+		Named("cacheuser").
+		Complete(r)
+}
+
+// userState is what Observe read of a user on the server.
+type userState struct {
+	info valkeyacl.UserInfo
+}
+
+// userExternal is the lifecycle.Rotator of one CacheUser (ADR 0002, section 8):
+// one ACL user whose passwords overlap during a rotation. status.externalName is
+// its name (derived once, with the long hash); status.externalId is the proof
+// that it is this claim's.
+type userExternal struct {
+	be    *backend
+	claim *cachev1alpha1.CacheUser
+	name  string
+	// pre is a precondition failure (the server is not Ready). Observe reports
+	// it, and Reconcile calls nothing else when Observe fails.
+	pre error
+	// persist writes the claim's status now, instead of at the end of the
+	// reconcile.
+	persist func(context.Context) error
+	// binding reads the binding Secret as it is now (through the API reader); nil
+	// when there is none.
+	binding func(context.Context) (*corev1.Secret, error)
+	// drop deletes a binding Secret.
+	drop func(context.Context, *corev1.Secret) error
+}
+
+func newUserExternal(be *backend, claim *cachev1alpha1.CacheUser) *userExternal {
+	// Observe goes by status.externalName, never by re-deriving (ADR 0002,
+	// section 3); the name is derived once, at the first reconcile.
+	name := claim.GetExternalName()
+	if name == "" {
+		name = userName(claim.Namespace, claim.Name)
+		claim.SetExternalName(name)
+	}
+	return &userExternal{be: be, claim: claim, name: name}
+}
+
+// tenant is what the spec lets the user do, on the keys of the claim's
+// namespace. The profile is checked again here (the CRD and the webhook have
+// checked it), and Rules checks the namespace.
+func (e *userExternal) tenant(spec cachev1alpha1.CacheUserSpec) (valkeyacl.Tenant, error) {
+	t := valkeyacl.Tenant{Prefix: e.claim.Namespace, Channels: spec.Channels}
+	switch spec.Profile {
+	case cachev1alpha1.ProfileReadOnly:
+	case cachev1alpha1.ProfileReadWrite, "":
+		t.Write = true
+	default:
+		return t, fmt.Errorf("%w: profile %q", ErrInvalidSpec, spec.Profile)
+	}
+	return t, nil
+}
+
+// rules rebuilds the ACL rules of the spec, which a write sends.
+func (e *userExternal) rules(spec cachev1alpha1.CacheUserSpec) ([]string, error) {
+	t, err := e.tenant(spec)
+	if err != nil {
+		return nil, err
+	}
+	rules, err := t.Rules()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidSpec, err)
+	}
+	return rules, nil
+}
+
+func (e *userExternal) collision() error {
+	return fmt.Errorf("%w: a user of the name %q exists and this claim did not make it", lifecycle.ErrNameCollision, e.name)
+}
+
+// Observe implements lifecycle.External. A user that exists while the claim has
+// no record of a create is not ours: it is refused, never adopted, changed or
+// deleted.
+func (e *userExternal) Observe(ctx context.Context, spec cachev1alpha1.CacheUserSpec) (lifecycle.Observation[userState], error) {
+	obs, err := e.observe(ctx, spec)
+	return obs, coarse(ctx, "observe", err)
+}
+
+func (e *userExternal) observe(ctx context.Context, spec cachev1alpha1.CacheUserSpec) (lifecycle.Observation[userState], error) {
+	none := lifecycle.Observation[userState]{}
+	// Reconcile adds the finalizer with a patch that replaces the claim with the
+	// server's copy, which loses a name set before it; set it again here.
+	e.claim.SetExternalName(e.name)
+	if e.pre != nil {
+		return none, e.pre
+	}
+	v, err := e.be.server(ctx)
+	if err != nil {
+		return none, err
+	}
+	info, err := v.GetUser(ctx, e.name)
+	if errors.Is(err, valkeyacl.ErrNotFound) {
+		return none, nil
+	}
+	if err != nil {
+		return none, err
+	}
+	if e.claim.GetExternalID() == "" {
+		return none, e.collision()
+	}
+	// A rule the controller refuses gives no wanted set, so the user is never up
+	// to date and Update reports it; deleting does not need a valid spec.
+	t, err := e.tenant(spec)
+	return lifecycle.Observation[userState]{Exists: true, UpToDate: err == nil && t.Matches(info), Current: userState{info}}, nil
+}
+
+// newPassword is a password for the user: 52 characters of 5 bits each.
+func newPassword() string { return rand.Text() + rand.Text() }
+
+// Create implements lifecycle.External: the user, with a new password and the
+// rules of the spec. It asks the server first: a user that exists while the claim
+// has no record of a create is someone else's, and nothing is written. Between
+// that check and the SETUSER another client could make a user of the same name,
+// and the command would then reset it; the window is as long as one round trip
+// and the name carries an 80-bit hash, so it is a known limit rather than
+// something the protocol lets us close (ACL SETUSER cannot fail on an existing
+// user).
+func (e *userExternal) Create(ctx context.Context, spec cachev1alpha1.CacheUserSpec) (binding.Data, error) {
+	data, err := e.create(ctx, spec)
+	return data, coarse(ctx, "create", err)
+}
+
+func (e *userExternal) create(ctx context.Context, spec cachev1alpha1.CacheUserSpec) (binding.Data, error) {
+	rules, err := e.rules(spec)
+	if err != nil {
+		return nil, err
+	}
+	v, err := e.be.server(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, err = v.GetUser(ctx, e.name)
+	switch {
+	case err == nil && e.claim.GetExternalID() == "":
+		return nil, e.collision()
+	case err != nil && !errors.Is(err, valkeyacl.ErrNotFound):
+		return nil, err
+	}
+	// Record the intent before the create, so a crash after it is recognised.
+	e.claim.SetExternalID(createIssued)
+	if err := e.persist(ctx); err != nil {
+		return nil, err
+	}
+	password := newPassword()
+	// "reset" first: whatever the user was (a crashed attempt of this claim's
+	// own), it is off, without passwords, keys, channels and commands before the
+	// rules apply.
+	if err := v.SetUser(ctx, e.name, append([]string{"reset", valkeyacl.AddPassword(password)}, rules...)...); err != nil {
+		e.withdraw(ctx, v, err)
 		return nil, err
 	}
 	e.claim.SetExternalID(e.name)
@@ -471,6 +746,19 @@ func (e *userExternal) begin(ctx context.Context) (binding.Data, error) {
 		// not reinstated from the Secret: that would let whoever can write the
 		// Secret choose a password for the user.
 		hashes := info.PasswordHashes
+		// A retry that never gets as far as the Secret adds a password nobody
+		// has; the oldest are dropped past a bound (the server lists them in the
+		// order they were added), the Secret's own one never.
+		if drop := len(hashes) - maxPasswords + 1; drop > 0 {
+			keep := valkeyacl.HashPassword(current)
+			hashes = slices.DeleteFunc(slices.Clone(hashes), func(h string) bool {
+				if drop > 0 && h != keep {
+					drop--
+					return true
+				}
+				return false
+			})
+		}
 		rules = valkeyacl.KeepOnly(hashes...)
 	}
 	if err := v.SetUser(ctx, e.name, append(rules, valkeyacl.AddPassword(password))...); err != nil {

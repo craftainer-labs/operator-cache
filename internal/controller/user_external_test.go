@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -217,24 +218,49 @@ func TestUserCreate(t *testing.T) {
 			t.Errorf("%s: %v", method, err)
 		}
 	}
+	refused := fmt.Errorf("%w: refused", valkeyacl.ErrServer)
 	// A create that failed with no user made withdraws its record, so a user
 	// made under the name later is a collision. Where the user exists, the record
 	// stays.
 	v = newMemValkey()
 	e = userExt(t, v)
-	v.fail["SetUser"] = errServer
+	v.fail["SetUser"] = refused
 	persisted := 0
 	e.persist = func(context.Context) error { persisted++; return nil }
-	if _, err := e.Create(ctx, extSpec); !errors.Is(err, errServer) || e.claim.GetExternalID() != "" || persisted != 2 {
+	if _, err := e.Create(ctx, extSpec); !errors.Is(err, refused) || e.claim.GetExternalID() != "" || persisted != 2 {
 		t.Errorf("failed create: %v, externalId %q, %d persists", err, e.claim.GetExternalID(), persisted)
+	}
+	// A persist that fails keeps the record in step with the stored one.
+	v = newMemValkey()
+	e = userExt(t, v)
+	v.fail["SetUser"] = refused
+	calls := 0
+	e.persist = func(context.Context) error {
+		if calls++; calls == 2 {
+			return errServer
+		}
+		return nil
+	}
+	if _, err := e.Create(ctx, extSpec); !errors.Is(err, refused) || e.claim.GetExternalID() != createIssued {
+		t.Errorf("withdraw whose write failed: %v, externalId %q", err, e.claim.GetExternalID())
+	}
+	// A timeout or a lost connection may have been applied: the record stays.
+	for _, cause := range []error{valkeyacl.ErrTimeout, valkeyacl.ErrUnavailable} {
+		v = newMemValkey()
+		e = userExt(t, v)
+		v.fail["SetUser"] = cause
+		e.persist = func(context.Context) error { return nil }
+		if _, err := e.Create(ctx, extSpec); !errors.Is(err, cause) || e.claim.GetExternalID() != createIssued {
+			t.Errorf("%v: %v, externalId %q", cause, err, e.claim.GetExternalID())
+		}
 	}
 	v = newMemValkey()
 	v.users[extName] = &memUser{commands: "-@all"}
 	e = userExt(t, v)
 	e.claim.SetExternalID(createIssued)
-	v.fail["SetUser"] = errServer
+	v.fail["SetUser"] = refused
 	e.persist = func(context.Context) error { return nil }
-	if _, err := e.Create(ctx, extSpec); !errors.Is(err, errServer) || e.claim.GetExternalID() != createIssued {
+	if _, err := e.Create(ctx, extSpec); !errors.Is(err, refused) || e.claim.GetExternalID() != createIssued {
 		t.Errorf("failed create of an existing user: %v, externalId %q", err, e.claim.GetExternalID())
 	}
 	v = newMemValkey()
@@ -429,6 +455,21 @@ func TestUserRotateBegin(t *testing.T) {
 	e.be.server = func(context.Context) (Valkey, error) { return nil, errServer }
 	if _, _, err := e.RotateBegin(ctx, extSpec, userState{}, st); !errors.Is(err, errServer) {
 		t.Errorf("connect: %v", err)
+	}
+}
+
+func TestUserRotateBeginBoundsThePasswords(t *testing.T) {
+	ctx := context.Background()
+	e, v, pw := created(t)
+	bindingWith(e, extName, pw)
+	for range 2 * maxPasswords {
+		if _, _, err := e.RotateBegin(ctx, extSpec, userState{}, lifecycle.RotationState{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The Secret still holds the first password, which is never dropped.
+	if u := v.user(extName); len(u.hashes) != maxPasswords || !u.hasPassword(pw) {
+		t.Errorf("passwords: %d, first kept: %v", len(u.hashes), u.hasPassword(pw))
 	}
 }
 
