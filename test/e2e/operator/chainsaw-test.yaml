@@ -655,7 +655,7 @@ spec:
               tp=$(sec team-user-redis keyPrefix)
               vks team-user-redis PUBLISH "${tp}c" x | grep -qx 0
               vks team-user-redis PUBLISH "other:c" x | grep -q NOPERM
-              vks team-user-redis SET "${tp}k" y | grep -qx OK
+              vks team-user-redis SET "${tp}team" y | grep -qx OK
 
     - name: a wrong password is refused
       try:
