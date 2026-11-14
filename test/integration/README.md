@@ -27,6 +27,9 @@ is server-side, so this lane checks what that fake only claims, against Valkey:
   and a delete that ends the user's sessions and leaves another user alone;
 - verified TLS: the system roots do not know the CA, a wrong host name fails, and
   the server does not answer a plain connection;
+- the health probe (`valkeyacl.Probe`): a login that reads the server's version
+  (`INFO server`, the real Valkey's `valkey_version`), and a wrong password or an
+  unknown administrator as `ErrAuth` with no password or host in the error;
 - the controller's paths (`controller_test.go`, through `controller.Integration`,
   which exists only with the `integration` tag and wires the External of a
   `CacheUser` to the real server and an in-memory binding Secret): create, with a

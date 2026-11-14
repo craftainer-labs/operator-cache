@@ -56,6 +56,9 @@ type ClusterCacheServerList struct {
 // GetCommon returns the settings every server kind shares.
 func (s *ClusterCacheServer) GetCommon() *common.ServerCommon { return &s.Spec.ServerCommon }
 
+// GetServerStatus returns the status the probe writes (probe.Server).
+func (s *ClusterCacheServer) GetServerStatus() *common.ServerStatus { return &s.Status }
+
 // GetEndpoint returns the server's URL, rediss://host:port.
 func (s *ClusterCacheServer) GetEndpoint() string { return s.Spec.Endpoint() }
 

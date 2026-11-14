@@ -32,7 +32,8 @@ is always deleted with the claim.
 
 ## Controllers
 
-One controller, `CacheUser`, built on `lifecycle.Reconcile` of lib-operator-go.
+One claim controller, `CacheUser`, built on `lifecycle.Reconcile` of lib-operator-go,
+and one health probe per server kind (see "Server health").
 It watches the claims, the binding Secrets it owns and the servers the claims
 name (a field index on `spec.serverRef` maps a server to its users, so a user
 that waits for its server is reconciled when the server is; a server's status
@@ -129,6 +130,58 @@ This is the rule every Craftainer operator follows when a claim is deleted:
 3. The operator does not look at a server's `Ready` condition to delete; it
    connects whenever the claim issued a create.
 
+### Server health
+
+`ClusterCacheServer` and `CacheServer` get the `ServerStatus` their CRDs promise
+from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind, wired in
+`internal/app`:
+
+- **What is probed:** a login as the ACL administrator (`ACL WHOAMI`) over
+  verified TLS. An answer proves both things the status promises: the server is
+  reachable and it accepts the admin credentials.
+- **The version** is read on the same connection: `INFO server`'s
+  `valkey_version` (`redis_version` on Redis), or, when the admin's ACL does not
+  allow `INFO`, the `version` of `HELLO`. A value that is not 1 to 64 bytes of
+  printable ASCII without spaces, or that neither command gives, leaves
+  `status.serverVersion` empty; the server is still `Ready` and reachable,
+  because reachability and accepted credentials are what the conditions say.
+  Only a connection that fails during the read makes the probe fail.
+- `status.lastProbeTime`: the last probe that ran and whose result was recorded
+  (a server that cannot be probed, `InvalidServer`, has none). It is rewritten
+  when the result changes and otherwise every 10 minutes, so a healthy fleet does
+  not write one status per server per minute.
+- `Ready` and `ServerReachable` are `True` (reason `Available`) when the probe
+  succeeded, and `False` with reason `ServerUnreachable` when it did not
+  (unreachable, TLS failure, refused login, or a failed command). A server whose
+  admin Secret is in a forbidden namespace is `AdminSecretNamespaceForbidden`;
+  one whose connection settings are missing or invalid (an absent Secret or CA
+  ConfigMap, a bad proxy URL, no `username` and `password`) is `Ready=False` with
+  `ServerReachable=Unknown` and reason `InvalidServer`. A server that is
+  `Ready=False` makes its claims wait (see the deletion rule for the exception).
+  The status never shows why a call failed; the operator log has a fixed text per
+  category (egress policy, TLS, login, timeout, other), once per change, with no
+  address, login or password.
+- A probe runs every `spec.healthCheckInterval` (default one minute, plus up to
+  10% jitter), whether the last one succeeded or not; a server is also probed at
+  once when it is created or its spec changes. A probe is bounded to 30 seconds.
+- The probe connects exactly as the claims do: the egress policy, the server's
+  TLS settings (its CA bundle, `tls.serverName`, minimum version) and proxy, as
+  the admin user, with the settings built by the same helper (`adminConfig`). It
+  makes **a fresh, short-lived connection of its own** and closes it on every
+  path; it never takes a connection from the claims' reference-counted
+  `ServerCache` or puts one there, so a probe can neither pin nor evict a cached
+  connection.
+- RBAC: `get`, `list` and `watch` on Secrets and ConfigMaps, and `get`, `update`
+  and `patch` on the servers' `status`, in the chart role.
+- Caches: the manager's Secret and ConfigMap caches keep only the objects with the
+  `managed-by` label (so the operator does not hold every Secret or ConfigMap in
+  memory), and the probe reads the admin Secret and the CA bundle live, not from
+  the cache, so every probe sees the current object. A change to an unlabelled
+  admin Secret, CA Secret or CA ConfigMap does not trigger a probe at once; it is
+  picked up at the next probe interval (one minute by default). Do not widen
+  either cache for that: it costs memory and widens exposure for a latency gain
+  of at most one interval.
+
 ## Known limits
 
 - **A create is not atomic.** Valkey has no "create unless exists" for
@@ -156,9 +209,6 @@ This is the rule every Craftainer operator follows when a claim is deleted:
   is replaced while a reconcile uses it is closed when that reconcile ends, and a
   timer (checking every five minutes) closes the connections nobody has used for
   ten minutes.
-- **The server's health is not probed yet.** `ClusterCacheServer` and
-  `CacheServer` have no `Ready` condition until the probe lands; a claim uses a
-  server with no condition.
 
 ## Install
 

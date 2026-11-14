@@ -22,14 +22,20 @@ import (
 	"time"
 
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 
+	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 	"github.com/craftainer-labs/operator-cache/internal/egress"
 )
 
@@ -385,4 +391,80 @@ func TestRunRejectsInvalidSettings(t *testing.T) {
 	err = Run(context.Background(), []string{"--default-data-deletion-policy=Maybe"}, noCluster, io.Discard)
 	g.Expect(err).To(HaveOccurred())
 	g.Expect(err.Error()).To(ContainSubstring("DEFAULT_DATA_DELETION_POLICY"))
+}
+
+// Each server kind has a probe controller that writes the kind's status. The
+// manager here reaches no Valkey (the egress policy refuses the loopback
+// address), so the probe's verdicts are the two it can reach without a server:
+// a server it cannot connect to, and one whose admin Secret is missing.
+func TestServerProbesWriteTheStatusOfBothKinds(t *testing.T) {
+	g := NewWithT(t)
+	ctx := context.Background()
+	c, err := client.New(testCfg, client.Options{Scheme: scheme})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	const opsNS = "operator-test" // POD_NAMESPACE, see TestMain
+	for _, name := range []string{opsNS, "team"} {
+		err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
+		g.Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
+	}
+	err = c.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "valkey-admin", Namespace: opsNS},
+		Data:       map[string][]byte{"username": []byte("admin"), "password": []byte("pw")},
+	})
+	g.Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
+	cluster := &cachev1alpha1.ClusterCacheServer{ObjectMeta: metav1.ObjectMeta{Name: "probe-cluster"}}
+	cluster.Spec.Host = "127.0.0.1"
+	cluster.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "valkey-admin", Namespace: opsNS}
+	cluster.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
+	g.Expect(c.Create(ctx, cluster)).To(Succeed())
+	namespaced := &cachev1alpha1.CacheServer{ObjectMeta: metav1.ObjectMeta{Name: "probe-team", Namespace: "team"}}
+	namespaced.Spec.Host = "127.0.0.1"
+	namespaced.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "missing"}
+	g.Expect(c.Create(ctx, namespaced)).To(Succeed())
+	t.Cleanup(func() { _ = c.Delete(ctx, cluster); _ = c.Delete(ctx, namespaced) })
+
+	probeAddr := freeAddr(t)
+	stop := start(t, []string{"--health-probe-bind-address=" + probeAddr, "--metrics-bind-address=0", "--webhook-port=-1"}, skipNameValidation)
+	defer func() { _ = stop() }()
+
+	ready := func(obj client.Object, st *common.ServerStatus) func() (string, error) {
+		return func() (string, error) {
+			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+				return "", err
+			}
+			cond := meta.FindStatusCondition(st.Conditions, conditions.Ready)
+			if cond == nil {
+				return "", nil
+			}
+			return string(cond.Status) + "/" + cond.Reason, nil
+		}
+	}
+	g.Eventually(ready(cluster, &cluster.Status), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.ServerUnreachable))
+	// A probe that ran is timestamped; a server that cannot be probed is not.
+	g.Expect(cluster.Status.LastProbeTime).NotTo(BeNil())
+	g.Eventually(ready(namespaced, &namespaced.Status), 30*time.Second, 200*time.Millisecond).Should(Equal("False/" + conditions.InvalidServer))
+	g.Expect(namespaced.Status.LastProbeTime).To(BeNil())
+	g.Expect(stop()).To(Succeed())
+}
+
+// The Secret and the ConfigMap cache each keep only the objects labelled
+// managed-by this operator (EB-2); the probes' watches go through them.
+func TestCacheByObjectRestrictsSecretsAndConfigMaps(t *testing.T) {
+	g := NewWithT(t)
+	want := "app.kubernetes.io/managed-by=" + EventRecorderName
+	var secrets, configMaps int
+	for obj, by := range cacheByObject() {
+		g.Expect(by.Label).NotTo(BeNil())
+		g.Expect(by.Label.String()).To(Equal(want))
+		switch obj.(type) {
+		case *corev1.Secret:
+			secrets++
+		case *corev1.ConfigMap:
+			configMaps++
+		default:
+			t.Errorf("unexpected cache restriction for %T", obj)
+		}
+	}
+	g.Expect([]int{secrets, configMaps}).To(Equal([]int{1, 1}))
 }

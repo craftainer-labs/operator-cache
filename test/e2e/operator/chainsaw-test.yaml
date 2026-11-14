@@ -523,6 +523,40 @@ spec:
                 port: 6379
                 mode: Standalone
 
+    - name: the servers report their own status
+      # The probe writes this, so a claim becoming Ready is no longer the
+      # evidence that a server is: assert it on the servers themselves.
+      # The expressions are null-safe: length() of a missing field is a JMESPath
+      # error that Chainsaw does not retry, so a not-yet-probed server would fail
+      # the step at once instead of waiting out the timeout. The version is
+      # deterministic here: the admin may run INFO (+@all), whose valkey_version
+      # the probe reads.
+      try:
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: ClusterCacheServer
+              metadata:
+                name: e2e-valkey
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+                (conditions[?type == 'ServerReachable'] | [0].status): "True"
+                (type(serverVersion) == 'string' && length(serverVersion) > `0`): true
+                (lastProbeTime != `null`): true
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheServer
+              metadata:
+                name: team-valkey
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+                (conditions[?type == 'ServerReachable'] | [0].status): "True"
+                (type(serverVersion) == 'string' && length(serverVersion) > `0`): true
+                (lastProbeTime != `null`): true
+
     - name: CacheUsers are created and become ready
       try:
         - apply:
