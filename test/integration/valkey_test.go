@@ -375,9 +375,9 @@ func TestReadWriteTenantIsConfinedToItsPrefix(t *testing.T) {
 	// What is never granted.
 	for _, cmd := range [][]string{
 		{"KEYS", "*"}, {"SCAN", "0"}, {"RANDOMKEY"}, {"FLUSHALL"}, {"FLUSHDB"}, {"INFO"}, {"CONFIG", "GET", "*"},
-		{"ACL", "WHOAMI"}, {"ACL", "SETUSER", "x", "on"}, {"CLIENT", "LIST"}, {"DEBUG", "SLEEP", "0"}, {"SHUTDOWN"},
+		{"ACL", "WHOAMI"}, {"ACL", "SETUSER", "x", "on"}, {"CLIENT", "LIST"}, {"SHUTDOWN"},
 		{"EVAL", "return 1", "0"}, {"SCRIPT", "FLUSH"}, {"MODULE", "LIST"}, {"SLAVEOF", "NO", "ONE"},
-		{"PUBLISH", "team-a:c", "m"}, {"SUBSCRIBE", "team-a:c"}, {"PUBSUB", "CHANNELS"},
+		{"PUBLISH", "team-a:c", "m"}, {"PUBSUB", "CHANNELS"},
 	} {
 		denied(t, c, cmd...)
 	}

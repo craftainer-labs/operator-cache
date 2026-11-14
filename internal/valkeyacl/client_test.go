@@ -26,6 +26,17 @@ func TestConnectAndWhoami(t *testing.T) {
 	}
 }
 
+func TestConnectDefaultTimeout(t *testing.T) {
+	f := newFake(t)
+	cfg := f.cfg()
+	cfg.Timeout = 0
+	a, err := valkeyacl.Connect(bg, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+}
+
 func TestConnectRefusesWhatItCannotUse(t *testing.T) {
 	f := newFake(t)
 	for name, mutate := range map[string]func(*valkeyacl.Config){

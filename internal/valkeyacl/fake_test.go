@@ -169,9 +169,13 @@ func readCommand(r *bufio.Reader) ([]string, error) {
 	return args, nil
 }
 
-func bulk(s string) string { return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s) }
+func bulk(s string) string {
+	return fmt.Sprintf("$%d\r\n%s\r\n", len(s), s)
+}
 
-func list(items ...string) string { return fmt.Sprintf("*%d\r\n%s", len(items), strings.Join(items, "")) }
+func list(items ...string) string {
+	return fmt.Sprintf("*%d\r\n%s", len(items), strings.Join(items, ""))
+}
 
 func (f *fake) serve(c net.Conn) {
 	defer func() { _ = c.Close() }()
