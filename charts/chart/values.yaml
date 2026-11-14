@@ -41,6 +41,28 @@ manager:
   args:
     - --leader-elect
 
+  ## Extra environment variables for the manager container (EB-5). POD_NAMESPACE,
+  ## EGRESS_MODE and DEFAULT_DATA_DELETION_POLICY are set by the chart (use
+  ## egressMode and defaultDataDeletionPolicy); the schema rejects them here.
+  ## They are rendered after the chart's own. E.g. HTTP(S)_PROXY and NO_PROXY for
+  ## the Kubernetes API client, or SSL_CERT_FILE with a custom CA bundle mounted
+  ## through extraVolumes and extraVolumeMounts. The operator makes no outbound
+  ## call of its own: it talks to the Kubernetes API and to the Valkey and Redis
+  ## servers named by the server kinds, and it never reads HTTP(S)_PROXY for
+  ## those. A server's own proxy and CA bundle are set on the server object
+  ## (spec.proxyURL, spec.tls.caBundle), not here. Note that HTTPS_PROXY also
+  ## applies to the API client, so list the API server in NO_PROXY.
+  ##
+  extraEnv: []
+  # extraEnv:
+  #   - name: NO_PROXY
+  #     value: .svc,.cluster.local,10.0.0.0/8
+
+  ## Extra volumes and mounts for the manager, e.g. a custom CA bundle.
+  ##
+  # extraVolumes: []
+  # extraVolumeMounts: []
+
   ## Health probes.
   ## The manager serves the liveness (/healthz) and readiness (/readyz) endpoints on this port.
   ##
@@ -124,6 +146,26 @@ manager:
   # pod:
   #   labels: {}
   #   annotations: {}
+
+## Which destinations the operator's connections to Valkey and Redis servers (and
+## their proxies) may not reach. The operator dials every server itself, so this
+## is its SSRF guard.
+## - strict (default): loopback, link-local, cloud metadata and the private
+##   ranges (RFC 1918, CGNAT, unique-local) are refused.
+## - allow-private: the private ranges are allowed; loopback, link-local and
+##   cloud metadata stay refused. Choose it when a server (such as an in-cluster
+##   Valkey Service) or a proxy lives on a private address, which is the usual
+##   case inside a cluster.
+## Rendered as the manager's EGRESS_MODE.
+##
+egressMode: strict
+
+## The deletionPolicy a new data kind is pinned to when its spec leaves it unset:
+## Retain (default) or Delete. Rendered as the manager's
+## DEFAULT_DATA_DELETION_POLICY. CacheUser is a credential kind and has no
+## deletionPolicy, so the value only matters for kinds a later release adds.
+##
+defaultDataDeletionPolicy: Retain
 
 ## RBAC configuration
 ##
