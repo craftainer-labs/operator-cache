@@ -275,3 +275,12 @@ func TestNilServerCacheCachesNothing(t *testing.T) {
 		t.Errorf("made = %d, a release must close the connection", len(made))
 	}
 }
+
+// A nil cache caches nothing, and has nothing to count.
+func TestNilServerCache(t *testing.T) {
+	var c *ServerCache
+	if c.Len() != 0 {
+		t.Errorf("Len of a nil cache = %d", c.Len())
+	}
+	c.Forget("k")
+}
