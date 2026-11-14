@@ -212,18 +212,125 @@ from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind, wired i
 
 ## Install
 
-The operator needs a Kubernetes cluster at 1.33 or newer and
-[cert-manager](https://cert-manager.io/) for its webhook certificates. A release
-publishes three artifacts to the OCI registry (see "Releases" below):
+The operator needs a Kubernetes cluster at 1.33 or newer. Helm and OLM v1 need
+[cert-manager](https://cert-manager.io/) for the webhooks' serving certificate;
+OLM v0 issues its own, so it needs none. A release publishes the Helm chart, an
+OLM bundle, a file-based catalog and the distroless `nonroot` image to GHCR,
+signed and attested (`release-extras.yml`, see "Releases" below and
+`docs/TEMPLATE.md`).
 
-- a Helm chart, `helm install operator-cache oci://<registry>/<path>/operator-cache --version X.Y.Z -n operator-cache-system --create-namespace`;
-- an OLM bundle and a file-based catalog, installable with OLM v0 and OLM v1's
-  `ClusterExtension`;
-- the distroless `nonroot` image the chart and bundle run.
+### Helm
 
-The registry and path come from the repository's `OCI_REGISTRY` variable and
-the release workflow. From a checkout, `make deploy` installs the kustomize
-manifests of `config/default`.
+```sh
+helm install operator-cache oci://ghcr.io/craftainer-labs/charts/operator-cache \
+  --version X.Y.Z --namespace operator-cache-system --create-namespace \
+  --set egressMode=allow-private
+```
+
+A released chart pins the manager image by digest. Values worth knowing (the
+schema, `charts/chart/values.schema.json`, rejects a misspelt enum or digest and
+a name in `manager.extraEnv` that the chart sets itself):
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `egressMode` | `strict` | `allow-private` is the usual choice when the server is an in-cluster Service or lives on a private address |
+| `defaultDataDeletionPolicy` | `Retain` | validated only: `CacheUser` is a credential kind with no `deletionPolicy` (see "Backup and restore") |
+| `global.imageRegistry` | empty | pull the image from a mirror (air-gapped) |
+| `manager.image.digest` | set when released | image by digest; wins over `tag` |
+| `manager.extraEnv` | `[]` | extra environment, rendered after the chart's own (not `POD_NAMESPACE`, `EGRESS_MODE` or `DEFAULT_DATA_DELETION_POLICY`: the chart sets them, and the schema rejects them here), e.g. `NO_PROXY` or `HTTPS_PROXY` for the Kubernetes API client (the Go client reads them; the operator's own code does not), or `SSL_CERT_FILE` with a bundle mounted through `manager.extraVolumes` and `manager.extraVolumeMounts` |
+| `manager.podSecurityContext`, `manager.securityContext` | restricted | non-root, seccomp `RuntimeDefault`, no privilege escalation, all capabilities dropped, read-only root filesystem; the e2e installs into a `restricted` namespace as an arbitrary UID |
+| `crd.keep` | `true` | keep the CRDs, and with them every claim, when the release is uninstalled |
+
+The operator makes no outbound call except to the Kubernetes API and to the
+servers named by the server kinds, and it sends no telemetry. A server's proxy
+and CA bundle belong to the server object (`spec.proxyURL`, `spec.tls.caBundle`),
+not to the chart.
+
+The CSV therefore declares `features.operators.openshift.io/proxy-aware: "false"`:
+the operator reads no `HTTP(S)_PROXY` (the server connection takes its proxy from
+`spec.proxyURL`), and the in-cluster Kubernetes API client needs no proxy.
+`disconnected` is `"true"` and the fips, tls-profiles and token-auth features are
+`"false"`.
+
+### OLM
+
+`make bundle` writes the bundle from `config/manifests` (`make bundle-validate`
+checks it offline; `bundle/` is generated and not committed). It supports
+`AllNamespaces` only, pins the manager image by digest and lists it in
+`spec.relatedImages`. The released bundle and a single-bundle catalog are
+`ghcr.io/craftainer-labs/operator-cache-bundle` and `...-catalog`; add the catalog
+as a `CatalogSource` (OLM v0) or a `ClusterCatalog` (OLM v1) and subscribe or
+create a `ClusterExtension`.
+
+From a checkout, `make deploy` installs the kustomize manifests of
+`config/default`, which also need cert-manager.
+
+## Backup and restore
+
+The operator holds no data of its own: everything it knows is in Kubernetes
+objects and in the server's ACL.
+
+| Kept in | What | Back it up with |
+| --- | --- | --- |
+| Kubernetes | the three kinds and their status (`status.externalName`, `status.externalId`, the rotation state), the binding Secrets (`servicebinding.io/redis`), the admin Secrets and CA bundles that servers reference | your cluster backup (Velero, GitOps, etcd). Restore the servers and their Secrets first, then the claims |
+| Valkey or Redis | the ACL users, their rules and password hashes, and the data in the keys | the server's own persistence and backup: an ACL file (`aclfile`) or the `user` lines of its configuration, and its RDB or AOF files. The operator never runs `ACL SAVE`, so a server that keeps its users only in memory loses them on a restart |
+
+The operator never copies or restores server state, and it cannot read a
+password back: the server keeps only a hash. What it does on a restore:
+
+- **There is no ownership marker.** An ACL user has no field for one. The only
+  proof that a claim made its user is the claim's own `status.externalId` (the
+  user's name, or `create-issued` while a create is in flight). A restore of the
+  claims whose status is lost therefore loses the proof. A restore from
+  manifests (GitOps) carries no status; a cluster backup does only if it
+  includes the status subresource.
+- **Restoring claims without their status, onto a server that still has the
+  users:** the claim has no `status.externalId`, so the user of its name is
+  foreign. The claim reports `Synced=False`, reason `NameCollision`, and nothing
+  is changed (see "Resolving a NameCollision"). To re-adopt, delete the user
+  (`ACL DELUSER <name>`, after checking nobody uses it) and let the claim create
+  it again, which issues a new password and rewrites the binding Secret.
+- **Restoring the server from an older copy:** users and their rules come back as
+  they were. A password rotated since the copy is lost while the binding Secret
+  still holds it, and the operator does not notice (it does not read passwords
+  back). A claim made after the copy has no user on the server, and a claim
+  whose recorded user is missing is created again: the server reports no such
+  user, so the operator makes it with a new password and rewrites the binding
+  Secret. A user that is still there has its rules repaired at the next
+  reconcile. Rotate the claim (`craftainer.dev/rotate`) to issue a
+  new password and rewrite the binding Secret; consumers read the new Secret.
+- **Binding Secrets** are rewritten by the operator, so a restore of them is not
+  required. A missing Secret, or one that does not hold the user's login, is
+  replaced through a rotation, not by resetting the password in place.
+- **The rotation grace period:** after a rotation both the previous and the new
+  password log in for `rotationPolicy.gracePeriod` (default `1h`, from `5m` to
+  `168h`), then the operator removes the previous one. A restore of the server
+  from a copy taken inside that window brings back the old password too; a rotation
+  ends it after its own grace period.
+
+`deletionPolicy` does not apply to `CacheUser`: it is a credential kind and has
+no `deletionPolicy` (`DEFAULT_DATA_DELETION_POLICY` is only validated). Deleting
+a claim deletes its ACL user, which ends its sessions, and never touches the
+keys: the data a user wrote stays on the server.
+
+- A claim that never issued a create (`status.externalId` is not set, for example
+  a `NameCollision`) is released without contacting the server.
+- Otherwise the operator deletes the user it recorded; one that is already gone
+  is a success.
+- Delete the claims before the server object: with the server or its admin
+  Secret gone, the claim cannot be cleaned up on the server: its finalizer stays,
+  and it reports `Synced=False` ("the referenced server was not found") until the
+  server object and its Secret are back.
+- Delete the claims before you uninstall the chart, and keep the server and its
+  admin Secret until the claims are gone: deleting a claim deletes its ACL user,
+  but only while the operator is running and the server is reachable. Uninstalling
+  the chart removes the operator; with the default `crd.keep=true` it keeps the
+  CRDs, the claims and their ACL users, and a claim deleted afterwards stays
+  `Terminating` until the operator is installed again. Removing its finalizer by
+  hand releases the claim but leaves its ACL user, with a valid password, on the
+  server. Deleting a CRD, or uninstalling with `crd.keep=false`, deletes every
+  claim of that kind: with the operator already gone they stay `Terminating` the
+  same way and the CRD deletion waits for them.
 
 ## Development
 
