@@ -251,9 +251,10 @@ func TestUserCreate(t *testing.T) {
 		v = newMemValkey()
 		e = userExt(t, v)
 		v.fail["SetUser"] = cause
-		e.persist = func(context.Context) error { return nil }
-		if _, err := e.Create(ctx, extSpec); !errors.Is(err, cause) || e.claim.GetExternalID() != createIssued {
-			t.Errorf("%v: %v, externalId %q", cause, err, e.claim.GetExternalID())
+		persists := 0
+		e.persist = func(context.Context) error { persists++; return nil }
+		if _, err := e.Create(ctx, extSpec); !errors.Is(err, cause) || e.claim.GetExternalID() != createIssued || persists != 1 {
+			t.Errorf("%v: %v, externalId %q, %d persists", cause, err, e.claim.GetExternalID(), persists)
 		}
 	}
 	v = newMemValkey()
