@@ -321,8 +321,10 @@ keys: the data a user wrote stays on the server.
   Secret gone, the claim cannot be cleaned up on the server: its finalizer stays,
   and it reports `Synced=False` ("the referenced server was not found") until the
   server object and its Secret are back.
-- Delete the claims before you uninstall the chart. Their finalizers need the
-  running operator: with the operator gone first, claims stay `Terminating` and
+- With the default `crd.keep=true`, uninstalling the chart keeps the CRDs, the
+  claims and their ACL users. To remove the users as well, delete the claims
+  before you uninstall the chart (deleting a claim deletes its ACL user). Their
+  finalizers need the running operator: with the operator gone first, claims stay `Terminating` and
   their ACL users stay on the server. Deleting a CRD (or uninstalling with
   `crd.keep=false`) deletes every claim of that kind, so the same order applies.
 
