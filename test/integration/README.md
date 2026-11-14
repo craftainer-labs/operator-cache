@@ -17,8 +17,9 @@ is server-side, so this lane checks what that fake only claims, against Valkey:
   its own prefix and nothing else (another tenant's keys, a name that only
   begins like the prefix, `MGET`, `RENAME` and `COPY` across prefixes), and never
   `KEYS`, `SCAN`, `RANDOMKEY`, `DBSIZE`, `FLUSHALL`, `CONFIG`, `ACL`,
-  `CLIENT LIST`, `CLIENT TRACKING`, `FUNCTION` writes, scripts or modules; a read-only tenant cannot write; channels follow the
-  prefix, and without them there is no publish;
+  `CLIENT LIST`, `CLIENT TRACKING`, `FUNCTION` writes, scripts or modules; a
+  read-only tenant cannot write; channels follow the prefix, and without them
+  there is no publish;
 - the overlap of a rotation: two passwords at once, then only the new one, by
   its hash, and the old one no longer logs in;
 - an update that keeps the password and repairs rules someone widened by hand,

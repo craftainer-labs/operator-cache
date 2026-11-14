@@ -183,7 +183,7 @@ func TestInvalidNamesNeverReachTheServer(t *testing.T) {
 	f := newFake(t)
 	a := connect(t, f)
 	before := len(f.commands())
-	for _, name := range []string{"", "default", "a b", "a\nb", "a\"b", "a'b", "a\x7fb", "admin"} {
+	for _, name := range []string{"", "default", "a b", "a\nb", "a\"b", "a'b", "a\x7fb"} {
 		if _, err := a.GetUser(bg, name); !errors.Is(err, valkeyacl.ErrInvalid) {
 			t.Errorf("GetUser(%q) = %v", name, err)
 		}
@@ -402,8 +402,10 @@ func TestEmptyPasswordIsRefused(t *testing.T) {
 	f := newFake(t)
 	a := connect(t, f)
 	before := len(f.commands())
-	if err := a.SetUser(bg, "u1", "on", valkeyacl.AddPassword("")); !errors.Is(err, valkeyacl.ErrInvalid) {
-		t.Fatalf("err = %v, want ErrInvalid", err)
+	for _, rule := range []string{valkeyacl.AddPassword(""), "nopass"} {
+		if err := a.SetUser(bg, "u1", "on", rule); !errors.Is(err, valkeyacl.ErrInvalid) {
+			t.Fatalf("rule %q: err = %v, want ErrInvalid", rule, err)
+		}
 	}
 	if len(f.commands()) != before {
 		t.Fatal("the command reached the server")
@@ -432,5 +434,23 @@ func TestACancelledCallLeavesTheConnectionAlive(t *testing.T) {
 	}
 	if _, err := a.GetUser(bg, "u1"); !errors.Is(err, valkeyacl.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound on a working connection", err)
+	}
+}
+
+func TestTheAdministratorsOwnLoginCanBeReadButNotChanged(t *testing.T) {
+	f := newFake(t)
+	a := connect(t, f)
+	before := len(f.commands())
+	if err := a.SetUser(bg, "admin", "off"); !errors.Is(err, valkeyacl.ErrInvalid) {
+		t.Errorf("SetUser = %v, want ErrInvalid", err)
+	}
+	if _, err := a.DelUser(bg, "admin"); !errors.Is(err, valkeyacl.ErrInvalid) {
+		t.Errorf("DelUser = %v, want ErrInvalid", err)
+	}
+	if after := len(f.commands()); after != before {
+		t.Fatalf("%d commands reached the server", after-before)
+	}
+	if _, err := a.GetUser(bg, "admin"); !errors.Is(err, valkeyacl.ErrNotFound) {
+		t.Errorf("GetUser = %v, want the fake's ErrNotFound (a read reaches the server)", err)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -199,8 +200,11 @@ func (a *Admin) do(ctx context.Context, name string, secret bool, args ...string
 	}
 	if err != nil {
 		// The caller's own cancellation or deadline says nothing of the
-		// connection, which others share, so it does not mark it down.
-		if _, ok := valkey.IsValkeyErr(err); !ok && parent.Err() == nil {
+		// connection, which others share, so it does not mark it down; any
+		// other failure does, even when the caller gave up at the same time.
+		callerGaveUp := parent.Err() != nil &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+		if _, ok := valkey.IsValkeyErr(err); !ok && !callerGaveUp {
 			a.down.Store(true)
 		}
 		return msg, reply(name, err, secret)
@@ -263,7 +267,9 @@ func validName(name string) error {
 
 // GetUser is ACL GETUSER. A user that does not exist is ErrNotFound.
 func (a *Admin) GetUser(ctx context.Context, name string) (UserInfo, error) {
-	if err := a.checkName(name); err != nil {
+	// Reading the administrator's own user is allowed: only a change locks
+	// the operator out.
+	if err := validName(name); err != nil {
 		return UserInfo{}, err
 	}
 	msg, err := a.do(ctx, "ACL", false, "GETUSER", name)
@@ -318,9 +324,9 @@ func (a *Admin) SetUser(ctx context.Context, name string, rules ...string) error
 	if err := a.checkName(name); err != nil {
 		return err
 	}
-	if slices.Contains(rules, ">") {
-		// An empty password would let anyone log in as the user.
-		return fmt.Errorf("%w: ACL SETUSER: an empty password", ErrInvalid)
+	if slices.Contains(rules, ">") || slices.Contains(rules, "nopass") {
+		// An empty password, or none at all, would let anyone log in as the user.
+		return fmt.Errorf("%w: ACL SETUSER: a login without a password", ErrInvalid)
 	}
 	_, err := a.do(ctx, "ACL", true, append([]string{"SETUSER", name}, rules...)...)
 	return err
