@@ -378,6 +378,11 @@ func TestReadWriteTenantIsConfinedToItsPrefix(t *testing.T) {
 		{"ACL", "WHOAMI"}, {"ACL", "SETUSER", "x", "on"}, {"CLIENT", "LIST"}, {"SHUTDOWN"},
 		{"EVAL", "return 1", "0"}, {"SCRIPT", "FLUSH"}, {"MODULE", "LIST"}, {"SLAVEOF", "NO", "ONE"},
 		{"PUBLISH", "team-a:c", "m"}, {"PUBSUB", "CHANNELS"},
+		// What the categories hold that reaches beyond the prefix.
+		{"DBSIZE"}, {"CLIENT", "TRACKING", "ON", "BCAST"}, {"FUNCTION", "FLUSH"}, {"FUNCTION", "DELETE", "x"},
+		{"FUNCTION", "LOAD", "#!lua name=x\nredis.register_function('x', function() return 1 end)"},
+		{"OBJECT", "ENCODING", "team-b:k"}, {"DUMP", "team-b:k"}, {"SORT_RO", "team-a:k", "BY", "team-b:*"},
+		{"MIGRATE", "localhost", "6379", "team-a:k", "0", "100"}, {"DEBUG", "SLEEP", "0"}, {"MONITOR"},
 	} {
 		denied(t, c, cmd...)
 	}

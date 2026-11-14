@@ -48,7 +48,7 @@ type Config struct {
 	// Username and Password are the administrator's login. An empty Username
 	// logs in as "default".
 	Username string
-	Password string
+	Password string `json:"-"`
 	// Dial connects to Address and is required: the operator passes the egress
 	// policy's dialer (an egress.DialFunc, assignable because this type is
 	// unnamed), and there is no default that could dial around it.
@@ -56,6 +56,16 @@ type Config struct {
 	// Timeout bounds the connect and every command; zero means ten seconds.
 	Timeout time.Duration
 }
+
+// String shows the config without the password, so that logging a Config (or a
+// struct that holds one) with %v or %+v does not write the password out.
+func (c Config) String() string {
+	return fmt.Sprintf("valkeyacl.Config{Address: %q, ServerName: %q, Username: %q, Password: <redacted>}",
+		c.Address, c.ServerName, c.Username)
+}
+
+// GoString is String for %#v.
+func (c Config) GoString() string { return c.String() }
 
 func (c Config) withDefaults() Config {
 	if c.Timeout == 0 {
@@ -69,6 +79,8 @@ func (c Config) withDefaults() Config {
 type Admin struct {
 	cli     valkey.Client
 	timeout time.Duration
+	// user is the administrator's own login, which no command may target.
+	user string
 	// down is set when a command failed for want of a connection, and says
 	// nothing else: valkey-go dials again by itself, but a cache that sees it
 	// replaces the Admin rather than wait for that.
@@ -115,7 +127,7 @@ func Connect(ctx context.Context, cfg Config) (*Admin, error) {
 		}
 		return err
 	}
-	a := &Admin{timeout: cfg.Timeout}
+	a := &Admin{timeout: cfg.Timeout, user: cmp.Or(cfg.Username, "default")}
 	cli, err := valkey.NewClient(valkey.ClientOption{
 		InitAddress:       []string{cfg.Address},
 		Username:          cfg.Username,
@@ -175,6 +187,7 @@ func (a *Admin) Close() {
 // do runs a command and returns its reply. secret says the command carries a
 // password, so a refusal does not repeat the server's words.
 func (a *Admin) do(ctx context.Context, name string, secret bool, args ...string) (valkey.ValkeyMessage, error) {
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 	cmd := a.cli.B().Arbitrary(name).Args(args...).Build()
@@ -185,7 +198,9 @@ func (a *Admin) do(ctx context.Context, name string, secret bool, args ...string
 		err = nil
 	}
 	if err != nil {
-		if _, ok := valkey.IsValkeyErr(err); !ok {
+		// The caller's own cancellation or deadline says nothing of the
+		// connection, which others share, so it does not mark it down.
+		if _, ok := valkey.IsValkeyErr(err); !ok && parent.Err() == nil {
 			a.down.Store(true)
 		}
 		return msg, reply(name, err, secret)
@@ -216,10 +231,22 @@ type UserInfo struct {
 	// Keys and Channels are the key and channel patterns.
 	Keys     string
 	Channels string
+	// Selectors is how many selectors the user has: each is a further set of
+	// permissions beside the root ones above.
+	Selectors int
 }
 
 // Has reports whether the user has a flag.
 func (u UserInfo) Has(flag string) bool { return slices.Contains(u.Flags, flag) }
+
+// checkName is validName, and also refuses the administrator's own login: a
+// command that deleted or turned off that user would lock the operator out.
+func (a *Admin) checkName(name string) error {
+	if name == a.user {
+		return fmt.Errorf("%w: the user name %q is the operator's own login", ErrInvalid, name)
+	}
+	return validName(name)
+}
 
 // validName refuses what must never reach ACL SETUSER or DELUSER: an empty
 // name, one with a space, a control character or a quote (the command is
@@ -236,7 +263,7 @@ func validName(name string) error {
 
 // GetUser is ACL GETUSER. A user that does not exist is ErrNotFound.
 func (a *Admin) GetUser(ctx context.Context, name string) (UserInfo, error) {
-	if err := validName(name); err != nil {
+	if err := a.checkName(name); err != nil {
 		return UserInfo{}, err
 	}
 	msg, err := a.do(ctx, "ACL", false, "GETUSER", name)
@@ -272,6 +299,10 @@ func parseUser(msg valkey.ValkeyMessage) (UserInfo, error) {
 			u.Keys, err = items[i+1].ToString()
 		case "channels":
 			u.Channels, err = items[i+1].ToString()
+		case "selectors":
+			var sel []valkey.ValkeyMessage
+			sel, err = items[i+1].ToArray()
+			u.Selectors = len(sel)
 		}
 		if err != nil {
 			return UserInfo{}, fmt.Errorf("%w: ACL GETUSER: field %q has an unexpected type", ErrServer, field)
@@ -284,8 +315,12 @@ func parseUser(msg valkey.ValkeyMessage) (UserInfo, error) {
 // rules in order. Rules that carry a password (">pw", "<pw") are never repeated
 // in an error.
 func (a *Admin) SetUser(ctx context.Context, name string, rules ...string) error {
-	if err := validName(name); err != nil {
+	if err := a.checkName(name); err != nil {
 		return err
+	}
+	if slices.Contains(rules, ">") {
+		// An empty password would let anyone log in as the user.
+		return fmt.Errorf("%w: ACL SETUSER: an empty password", ErrInvalid)
 	}
 	_, err := a.do(ctx, "ACL", true, append([]string{"SETUSER", name}, rules...)...)
 	return err
@@ -294,7 +329,7 @@ func (a *Admin) SetUser(ctx context.Context, name string, rules ...string) error
 // DelUser is ACL DELUSER, and reports whether a user was deleted. The server
 // ends the connections the user has open.
 func (a *Admin) DelUser(ctx context.Context, name string) (bool, error) {
-	if err := validName(name); err != nil {
+	if err := a.checkName(name); err != nil {
 		return false, err
 	}
 	msg, err := a.do(ctx, "ACL", false, "DELUSER", name)

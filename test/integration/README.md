@@ -16,8 +16,8 @@ is server-side, so this lane checks what that fake only claims, against Valkey:
 - what a tenant's ACL lets a real client do, as the application would connect:
   its own prefix and nothing else (another tenant's keys, a name that only
   begins like the prefix, `MGET`, `RENAME` and `COPY` across prefixes), and never
-  `KEYS`, `SCAN`, `RANDOMKEY`, `FLUSHALL`, `CONFIG`, `ACL`, `CLIENT LIST`,
-  scripts or modules; a read-only tenant cannot write; channels follow the
+  `KEYS`, `SCAN`, `RANDOMKEY`, `DBSIZE`, `FLUSHALL`, `CONFIG`, `ACL`,
+  `CLIENT LIST`, `CLIENT TRACKING`, `FUNCTION` writes, scripts or modules; a read-only tenant cannot write; channels follow the
   prefix, and without them there is no publish;
 - the overlap of a rotation: two passwords at once, then only the new one, by
   its hash, and the old one no longer logs in;

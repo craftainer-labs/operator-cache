@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -182,7 +183,7 @@ func TestInvalidNamesNeverReachTheServer(t *testing.T) {
 	f := newFake(t)
 	a := connect(t, f)
 	before := len(f.commands())
-	for _, name := range []string{"", "default", "a b", "a\nb", "a\"b", "a'b", "a\x7fb"} {
+	for _, name := range []string{"", "default", "a b", "a\nb", "a\"b", "a'b", "a\x7fb", "admin"} {
 		if _, err := a.GetUser(bg, name); !errors.Is(err, valkeyacl.ErrInvalid) {
 			t.Errorf("GetUser(%q) = %v", name, err)
 		}
@@ -243,6 +244,7 @@ func TestMalformedAnswers(t *testing.T) {
 		{"a name that is not text", list(":1\r\n", bulk("x"))},
 		{"flags that are not a list", list(bulk("flags"), bulk("on"))},
 		{"a number for commands", list(bulk("commands"), ":1\r\n")},
+		{"selectors that are not a list", list(bulk("selectors"), bulk("x"))},
 		{"not a list", bulk("hello")},
 	} {
 		f.mu.Lock()
@@ -298,15 +300,15 @@ func TestTenantRules(t *testing.T) {
 	}{
 		{"read only", valkeyacl.Tenant{Prefix: "a"}, []string{
 			"on", "clearselectors", "resetkeys", "%R~a:*", "resetchannels",
-			"-@all", "+@connection", "+@read", "-@dangerous", "-@admin", "-scan", "-randomkey",
+			"-@all", "+@connection", "+@read", "-@dangerous", "-@admin", "-@scripting", "-scan", "-randomkey", "-dbsize", "-client|tracking",
 		}},
 		{"read write", valkeyacl.Tenant{Prefix: "team-1", Write: true}, []string{
 			"on", "clearselectors", "resetkeys", "~team-1:*", "resetchannels",
-			"-@all", "+@connection", "+@read", "+@write", "-@dangerous", "-@admin", "-scan", "-randomkey",
+			"-@all", "+@connection", "+@read", "+@write", "-@dangerous", "-@admin", "-@scripting", "-scan", "-randomkey", "-dbsize", "-client|tracking",
 		}},
 		{"channels", valkeyacl.Tenant{Prefix: "x1", Write: true, Channels: true}, []string{
 			"on", "clearselectors", "resetkeys", "~x1:*", "resetchannels", "&x1:*",
-			"-@all", "+@connection", "+@read", "+@write", "+@pubsub", "-@dangerous", "-@admin", "-scan", "-randomkey", "-pubsub",
+			"-@all", "+@connection", "+@read", "+@write", "+@pubsub", "-@dangerous", "-@admin", "-@scripting", "-scan", "-randomkey", "-dbsize", "-client|tracking", "-pubsub",
 		}},
 	}
 	for _, c := range cases {
@@ -349,6 +351,7 @@ func TestTenantMatches(t *testing.T) {
 		"other keys":     func(u *valkeyacl.UserInfo) { u.Keys = "~*" },
 		"other channels": func(u *valkeyacl.UserInfo) { u.Channels = "&*" },
 		"other commands": func(u *valkeyacl.UserInfo) { u.Commands = "+@all" },
+		"a selector":     func(u *valkeyacl.UserInfo) { u.Selectors = 1 },
 	} {
 		u := ok
 		mutate(&u)
@@ -374,5 +377,60 @@ func TestLostConnectionIsUnavailableAndNotAlive(t *testing.T) {
 	}
 	if a.Alive() {
 		t.Fatal("a connection the server dropped is alive")
+	}
+}
+
+func TestSelectorsAreReported(t *testing.T) {
+	f := newFake(t)
+	a := connect(t, f)
+	f.mu.Lock()
+	f.users["u1"] = &fakeUser{flags: []string{"on"}, selectors: 2}
+	f.mu.Unlock()
+	u, err := a.GetUser(bg, "u1")
+	if err != nil || u.Selectors != 2 {
+		t.Fatalf("user = %+v, %v", u, err)
+	}
+	if err := a.SetUser(bg, "u1", "clearselectors"); err != nil {
+		t.Fatal(err)
+	}
+	if u, _ = a.GetUser(bg, "u1"); u.Selectors != 0 {
+		t.Fatalf("selectors = %d after clearselectors", u.Selectors)
+	}
+}
+
+func TestEmptyPasswordIsRefused(t *testing.T) {
+	f := newFake(t)
+	a := connect(t, f)
+	before := len(f.commands())
+	if err := a.SetUser(bg, "u1", "on", valkeyacl.AddPassword("")); !errors.Is(err, valkeyacl.ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	if len(f.commands()) != before {
+		t.Fatal("the command reached the server")
+	}
+}
+
+func TestConfigDoesNotPrintThePassword(t *testing.T) {
+	cfg := newFake(t).cfg()
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		if out := fmt.Sprintf(verb, cfg); strings.Contains(out, cfg.Password) {
+			t.Errorf("%s shows the password: %s", verb, out)
+		}
+	}
+}
+
+func TestACancelledCallLeavesTheConnectionAlive(t *testing.T) {
+	f := newFake(t)
+	a := connect(t, f)
+	ctx, cancel := context.WithCancel(bg)
+	cancel()
+	if _, err := a.GetUser(ctx, "u1"); err == nil {
+		t.Fatal("a cancelled call succeeded")
+	}
+	if !a.Alive() {
+		t.Fatal("the caller's cancellation marked the shared connection down")
+	}
+	if _, err := a.GetUser(bg, "u1"); !errors.Is(err, valkeyacl.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound on a working connection", err)
 	}
 }

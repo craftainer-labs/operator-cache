@@ -28,7 +28,11 @@ type Tenant struct {
 // with Write, the write commands, then the categories that are never granted.
 // The last rules also take out what the categories hold that reaches beyond the
 // prefix: SCAN and RANDOMKEY list key names without checking the key
-// patterns, and PUBSUB lists channel names.
+// patterns, DBSIZE counts every tenant's keys, PUBSUB lists channel names,
+// CLIENT TRACKING (a connection command) can broadcast the names of keys
+// whatever their pattern, and the FUNCTION write commands (load, delete,
+// flush and restore are @write but not @dangerous) change libraries that every
+// tenant shares. @scripting is taken out whole, as no tenant runs scripts.
 func (t Tenant) commandRules() []string {
 	rules := []string{"-@all", "+@connection", "+@read"}
 	if t.Write {
@@ -37,7 +41,7 @@ func (t Tenant) commandRules() []string {
 	if t.Channels {
 		rules = append(rules, "+@pubsub")
 	}
-	rules = append(rules, "-@dangerous", "-@admin", "-scan", "-randomkey")
+	rules = append(rules, "-@dangerous", "-@admin", "-@scripting", "-scan", "-randomkey", "-dbsize", "-client|tracking")
 	if t.Channels {
 		rules = append(rules, "-pubsub")
 	}
@@ -84,8 +88,10 @@ func (t Tenant) Rules() ([]string, error) {
 }
 
 // Matches reports whether a user is what the tenant's rules make: on, with a
-// password, with the tenant's key and channel patterns and command rules.
+// password, with the tenant's key and channel patterns and command rules and no
+// selector (a selector is a second set of permissions that would widen the
+// user, and "clearselectors" in Rules removes it).
 func (t Tenant) Matches(u UserInfo) bool {
-	return u.Has("on") && !u.Has("nopass") && u.Keys == t.Keys() &&
+	return u.Has("on") && !u.Has("nopass") && u.Selectors == 0 && u.Keys == t.Keys() &&
 		u.Channels == t.ChannelPattern() && u.Commands == t.Commands()
 }

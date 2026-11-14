@@ -77,6 +77,8 @@ type fakeUser struct {
 	commands string
 	keys     string
 	channels string
+	// selectors is how many selectors the user has.
+	selectors int
 }
 
 // fake is a Valkey that speaks the subset of RESP2 the client uses over TLS.
@@ -253,7 +255,7 @@ func (f *fake) acl(args []string) string {
 			return list(out...)
 		}
 		return list(bulk("flags"), strs(u.flags), bulk("passwords"), strs(u.hashes), bulk("commands"), bulk(u.commands),
-			bulk("keys"), bulk(u.keys), bulk("channels"), bulk(u.channels), bulk("selectors"), "*0\r\n")
+			bulk("keys"), bulk(u.keys), bulk("channels"), bulk(u.channels), bulk("selectors"), list(slices.Repeat([]string{"*0\r\n"}, u.selectors)...))
 	case "DELUSER":
 		if f.garbage != "" {
 			return f.garbage
@@ -287,6 +289,7 @@ func (f *fake) setUser(name string, rules []string) string {
 		case r == "resetchannels":
 			u.channels = ""
 		case r == "clearselectors":
+			u.selectors = 0
 		case strings.HasPrefix(r, ">"):
 			h := sha(r[1:])
 			if !slices.Contains(u.hashes, h) {
