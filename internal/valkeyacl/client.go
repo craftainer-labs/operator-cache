@@ -244,7 +244,8 @@ type UserInfo struct {
 func (u UserInfo) Has(flag string) bool { return slices.Contains(u.Flags, flag) }
 
 // checkName is validName, and also refuses the administrator's own login: a
-// command that deleted or turned off that user would lock the operator out.
+// command that deleted or turned off that user would lock the operator out, and
+// no caller has a reason to read its password hashes.
 func (a *Admin) checkName(name string) error {
 	if name == a.user {
 		return fmt.Errorf("%w: the user name %q is the operator's own login", ErrInvalid, name)
@@ -267,9 +268,7 @@ func validName(name string) error {
 
 // GetUser is ACL GETUSER. A user that does not exist is ErrNotFound.
 func (a *Admin) GetUser(ctx context.Context, name string) (UserInfo, error) {
-	// Reading the administrator's own user is allowed: only a change locks
-	// the operator out.
-	if err := validName(name); err != nil {
+	if err := a.checkName(name); err != nil {
 		return UserInfo{}, err
 	}
 	msg, err := a.do(ctx, "ACL", false, "GETUSER", name)
@@ -324,9 +323,11 @@ func (a *Admin) SetUser(ctx context.Context, name string, rules ...string) error
 	if err := a.checkName(name); err != nil {
 		return err
 	}
-	if slices.Contains(rules, ">") || slices.Contains(rules, "nopass") {
-		// An empty password, or none at all, would let anyone log in as the user.
-		return fmt.Errorf("%w: ACL SETUSER: a login without a password", ErrInvalid)
+	// Two spellings that leave the user without a usable password (an empty
+	// one, or none) are refused here, whatever their case; what the rules
+	// make of the user as a whole is Tenant.Matches's to judge.
+	if slices.ContainsFunc(rules, func(r string) bool { return r == ">" || strings.EqualFold(r, "nopass") }) {
+		return fmt.Errorf("%w: ACL SETUSER: a rule that leaves the user with an empty password or none", ErrInvalid)
 	}
 	_, err := a.do(ctx, "ACL", true, append([]string{"SETUSER", name}, rules...)...)
 	return err
