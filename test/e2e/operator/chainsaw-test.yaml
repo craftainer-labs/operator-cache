@@ -1,7 +1,8 @@
 # Installs the Helm chart into a Pod Security `restricted` namespace, with the
 # manager running as an arbitrary UID, then exercises the cache.craftainer.dev API
-# end to end: the CRDs, their defaults and the webhooks (the controllers come
-# later). The steps run in order; the cluster is thrown away afterwards.
+# (CRDs, schema defaults and rules, webhooks) and the CacheUser create, ready,
+# rotate and delete paths against a Valkey with TLS and ACLs that runs in the
+# cluster. The steps run in order; the cluster is thrown away afterwards.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -28,6 +29,9 @@ spec:
                 --set manager.image.tag="$E2E_IMAGE_TAG" \
                 --set manager.image.pullPolicy=Never \
                 --set manager.podSecurityContext.runAsUser=12345 \
+                --set egressMode=allow-private \
+                --set 'manager.extraEnv[0].name=NO_PROXY' \
+                --set 'manager.extraEnv[0].value=.svc\,.cluster.local' \
                 --wait --timeout 4m
         - assert:
             resource:
@@ -40,6 +44,8 @@ spec:
       cleanup:
         - script:
             content: helm uninstall operator-cache --namespace "$NAMESPACE" --ignore-not-found
+        - script:
+            content: rm -f "${TMPDIR:-/tmp}"/e2e-*-"$NAMESPACE"
 
     - name: runs as an arbitrary UID with leader election
       try:
@@ -50,6 +56,16 @@ spec:
               test "$uid" = 12345
               ro=$(kubectl get pods -n "$NAMESPACE" -l control-plane=controller-manager -o jsonpath='{.items[0].spec.containers[0].securityContext.readOnlyRootFilesystem}')
               test "$ro" = true
+              # EB-10: restricted profile, all capabilities dropped, no escalation.
+              ctr='{.items[0].spec.containers[0].securityContext}'
+              sc=$(kubectl get pods -n "$NAMESPACE" -l control-plane=controller-manager -o jsonpath="$ctr")
+              echo "$sc" | grep -q '"allowPrivilegeEscalation":false'
+              echo "$sc" | grep -q '"drop":\["ALL"\]'
+              seccomp=$(kubectl get pods -n "$NAMESPACE" -l control-plane=controller-manager -o jsonpath='{.items[0].spec.securityContext.seccompProfile.type}')
+              test "$seccomp" = RuntimeDefault
+              # EB-5: extraEnv reaches the container, after the chart's own.
+              envs=$(kubectl get pods -n "$NAMESPACE" -l control-plane=controller-manager -o jsonpath='{.items[0].spec.containers[0].env[?(@.name=="NO_PROXY")].value}')
+              test "$envs" = ".svc,.cluster.local"
         - assert:
             resource:
               apiVersion: coordination.k8s.io/v1
@@ -166,3 +182,808 @@ spec:
       cleanup:
         - script:
             content: kubectl delete clusterrolebinding "e2e-metrics-${NAMESPACE}" --ignore-not-found
+
+    # What follows runs the claims against a real Valkey in the test namespace
+    # (Pod Security `restricted`, so it runs as the image's valkey user, 999)
+    # with TLS from a cert-manager certificate for the Service name, which the
+    # servers verify, and ACLs: `default` is off and the only user is the admin,
+    # whose password comes from the admin Secret. The image is the one of
+    # .github/workflows/integration.yml (same digest). The `vkc` pod runs the same
+    # image's valkey-cli with the CA mounted: `/m/vk` runs a command as the login
+    # whose name and password are the first two lines of its stdin (so a
+    # credential never appears in an argument of `kubectl exec`) and `/m/adm`
+    # runs one as the admin.
+    - name: a TLS Valkey with ACLs
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: valkey-admin-e2e
+              stringData:
+                username: admin
+                password: e2e-only-admin-password
+        - apply:
+            resource:
+              apiVersion: cert-manager.io/v1
+              kind: Issuer
+              metadata:
+                name: valkey-selfsigned
+              spec:
+                selfSigned: {}
+        - apply:
+            resource:
+              apiVersion: cert-manager.io/v1
+              kind: Certificate
+              metadata:
+                name: valkey-ca
+              spec:
+                isCA: true
+                commonName: e2e valkey CA
+                secretName: valkey-ca
+                privateKey:
+                  algorithm: ECDSA
+                  size: 256
+                issuerRef:
+                  name: valkey-selfsigned
+                  kind: Issuer
+        - apply:
+            resource:
+              apiVersion: cert-manager.io/v1
+              kind: Issuer
+              metadata:
+                name: valkey-ca
+              spec:
+                ca:
+                  secretName: valkey-ca
+        - apply:
+            resource:
+              apiVersion: cert-manager.io/v1
+              kind: Certificate
+              metadata:
+                name: valkey-tls
+              spec:
+                secretName: valkey-tls
+                privateKey:
+                  algorithm: ECDSA
+                  size: 256
+                  encoding: PKCS8
+                usages: [digital signature, server auth]
+                dnsNames:
+                  - valkey
+                  - localhost
+                  - (join('.', ['valkey', $namespace, 'svc']))
+                  - (join('.', ['valkey', $namespace, 'svc', 'cluster.local']))
+                ipAddresses:
+                  - 127.0.0.1
+                issuerRef:
+                  name: valkey-ca
+                  kind: Issuer
+        - assert:
+            resource:
+              apiVersion: cert-manager.io/v1
+              kind: Certificate
+              metadata:
+                name: valkey-tls
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: valkey-conf
+              data:
+                valkey.conf: |
+                  # The same settings as test/integration/valkey.conf, with the
+                  # paths of this pod. The admin user is appended at start-up
+                  # from the admin Secret.
+                  port 0
+                  tls-port 6379
+                  tls-cert-file /tls/server.crt
+                  tls-key-file /tls/server.key
+                  tls-ca-cert-file /tls/ca.crt
+                  tls-auth-clients no
+                  tls-protocols "TLSv1.2 TLSv1.3"
+                  user default off
+                  dir /data
+                  save ""
+                  appendonly no
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: valkey
+              spec:
+                selector:
+                  app: valkey
+                ports:
+                  - name: tls
+                    port: 6379
+                    targetPort: tls
+        - apply:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: valkey
+              spec:
+                replicas: 1
+                strategy:
+                  type: Recreate
+                selector:
+                  matchLabels:
+                    app: valkey
+                template:
+                  metadata:
+                    labels:
+                      app: valkey
+                  spec:
+                    securityContext:
+                      runAsNonRoot: true
+                      runAsUser: 999
+                      runAsGroup: 999
+                      fsGroup: 999
+                      seccompProfile:
+                        type: RuntimeDefault
+                    containers:
+                      - name: valkey
+                        # Same image as .github/workflows/integration.yml.
+                        image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+                        command: [sh, -c]
+                        args:
+                          - 'cat /conf/valkey.conf > /data/valkey.conf && printf "user admin on >%s ~* &* +@all\n" "$ADMIN_PASS" >> /data/valkey.conf && exec valkey-server /data/valkey.conf'
+                        env:
+                          - name: ADMIN_PASS
+                            valueFrom:
+                              secretKeyRef: {name: valkey-admin-e2e, key: password}
+                        ports:
+                          - name: tls
+                            containerPort: 6379
+                        # Readiness over TLS: the CA verifies the server's
+                        # certificate (localhost is one of its names) and the
+                        # admin logs in, so a server that only listens is not
+                        # Ready.
+                        readinessProbe:
+                          exec:
+                            command:
+                              - sh
+                              - -c
+                              - 'valkey-cli --tls --cacert /tls/ca.crt -h localhost --user admin --pass "$ADMIN_PASS" --no-auth-warning ping | grep -q PONG'
+                          periodSeconds: 3
+                          timeoutSeconds: 5
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop: [ALL]
+                        volumeMounts:
+                          - {name: data, mountPath: /data}
+                          - {name: conf, mountPath: /conf, readOnly: true}
+                          - {name: tls, mountPath: /tls, readOnly: true}
+                    volumes:
+                      - name: data
+                        emptyDir: {}
+                      - name: conf
+                        configMap:
+                          name: valkey-conf
+                      - name: tls
+                        secret:
+                          secretName: valkey-tls
+                          items:
+                            - {key: tls.crt, path: server.crt}
+                            - {key: tls.key, path: server.key}
+                            - {key: ca.crt, path: ca.crt}
+        - assert:
+            timeout: 5m
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: valkey
+              status:
+                availableReplicas: 1
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: vkc-bin
+              data:
+                vk: |
+                  #!/bin/sh
+                  # vk ARGS...: runs valkey-cli as the login whose name and
+                  # password are the first two lines of stdin.
+                  set -eu
+                  IFS= read -r U
+                  IFS= read -r P
+                  exec valkey-cli --tls --cacert /ca/ca.crt -h "$HOST" --user "$U" --pass "$P" --no-auth-warning "$@"
+                adm: |
+                  #!/bin/sh
+                  # adm ARGS...: runs valkey-cli as the admin.
+                  set -eu
+                  exec valkey-cli --tls --cacert /ca/ca.crt -h "$HOST" --user "$ADMIN_USER" --pass "$ADMIN_PASS" --no-auth-warning "$@"
+        - apply:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: vkc
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: vkc
+                template:
+                  metadata:
+                    labels:
+                      app: vkc
+                  spec:
+                    securityContext:
+                      runAsNonRoot: true
+                      runAsUser: 999
+                      runAsGroup: 999
+                      seccompProfile:
+                        type: RuntimeDefault
+                    containers:
+                      - name: clients
+                        image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+                        command: [sh, -c, sleep 86400]
+                        env:
+                          - name: HOST
+                            value: (join('.', ['valkey', $namespace, 'svc']))
+                          - name: ADMIN_USER
+                            valueFrom:
+                              secretKeyRef: {name: valkey-admin-e2e, key: username}
+                          - name: ADMIN_PASS
+                            valueFrom:
+                              secretKeyRef: {name: valkey-admin-e2e, key: password}
+                        securityContext:
+                          allowPrivilegeEscalation: false
+                          capabilities:
+                            drop: [ALL]
+                        volumeMounts:
+                          - {name: ca, mountPath: /ca, readOnly: true}
+                          - {name: bin, mountPath: /m, readOnly: true}
+                    volumes:
+                      - name: ca
+                        secret:
+                          secretName: valkey-tls
+                          items:
+                            - {key: ca.crt, path: ca.crt}
+                      - name: bin
+                        configMap:
+                          name: vkc-bin
+                          # 0555 (decimal: YAML 1.2 reads 0555 as 555).
+                          defaultMode: 365
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: vkc
+              status:
+                availableReplicas: 1
+        - script:
+            timeout: 2m
+            content: |
+              set -eu
+              # The server answers over TLS with a verified certificate and
+              # accepts the admin, through its Service name (a bounded retry: the
+              # Service needs a moment to have an endpoint).
+              deadline=$(( $(date +%s) + 90 ))
+              until kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ping 2>&1 | grep -q PONG; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "the server did not answer the admin over TLS"
+                  exit 1
+                fi
+                sleep 2
+              done
+
+    - name: the servers are admitted
+      try:
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: ClusterCacheServer
+              metadata:
+                name: e2e-valkey
+              spec:
+                host: (join('.', ['valkey', $namespace, 'svc']))
+                tls:
+                  caBundle:
+                    secretRef: {name: valkey-tls}
+                adminCredentialsSecretRef:
+                  name: valkey-admin-e2e
+                  namespace: ($namespace)
+                allowedNamespaces:
+                  from: All
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheServer
+              metadata:
+                name: team-valkey
+              spec:
+                host: (join('.', ['valkey', $namespace, 'svc']))
+                tls:
+                  caBundle:
+                    secretRef: {name: valkey-tls}
+                adminCredentialsSecretRef:
+                  name: valkey-admin-e2e
+        - assert:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: ClusterCacheServer
+              metadata:
+                name: e2e-valkey
+              spec:
+                port: 6379
+                mode: Standalone
+
+    - name: CacheUsers are created and become ready
+      try:
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: app
+              spec:
+                serverRef: {kind: ClusterCacheServer, name: e2e-valkey}
+                binding: {secretName: app-redis}
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: reader
+              spec:
+                serverRef: {kind: ClusterCacheServer, name: e2e-valkey}
+                binding: {secretName: reader-redis}
+                profile: ReadOnly
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: team-user
+              spec:
+                serverRef: {kind: CacheServer, name: team-valkey}
+                binding: {secretName: team-user-redis}
+                channels: true
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: app
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+                (conditions[?type == 'Synced'] | [0].status): "True"
+                (type(externalName) == 'string' && length(externalName) > `0`): true
+                (type(externalId) == 'string' && externalId == externalName): true
+                binding:
+                  name: app-redis
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: reader
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: team-user
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: app-redis
+              type: servicebinding.io/redis
+              data:
+                (host != `null`): true
+                (port != `null`): true
+                (uri != `null`): true
+                (username != `null`): true
+                (password != `null`): true
+                (keyPrefix != `null`): true
+                (sslrootcert != `null`): true
+        - script:
+            timeout: 2m
+            content: |
+              set -eu
+              sec() { kubectl get secret "$1" -n "$NAMESPACE" -o "jsonpath={.data.$2}" | base64 -d; }
+              name=$(kubectl get cacheuser app -n "$NAMESPACE" -o jsonpath='{.status.externalName}')
+              test -n "$name"
+              # The binding names the server, its CA and the tenant's prefix,
+              # and is not the admin's. The URI carries no credentials.
+              test "$(sec app-redis host)" = "valkey.${NAMESPACE}.svc"
+              test "$(sec app-redis port)" = 6379
+              test "$(sec app-redis uri)" = "rediss://valkey.${NAMESPACE}.svc:6379"
+              test "$(sec app-redis keyPrefix)" = "${NAMESPACE}:"
+              test "$(sec app-redis username)" = "$name"
+              test "$(sec app-redis username)" != admin
+              test -n "$(sec app-redis sslrootcert)"
+              # The user exists on the server with the tenant's key pattern,
+              # no channels, and the password the binding holds.
+              info=$(kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL GETUSER "$name" 2>&1)
+              printf %s "$info" | grep -qF "~${NAMESPACE}:*"
+              printf %s "$info" | grep -q '^on$'
+
+    - name: a binding logs in over TLS and stays inside its prefix
+      try:
+        - script:
+            timeout: 3m
+            content: |
+              set -eu
+              sec() { kubectl get secret "$1" -n "$NAMESPACE" -o "jsonpath={.data.$2}" | base64 -d; }
+              # vks SECRET ARGS...: runs valkey-cli as the login of a binding
+              # Secret; the credentials go in on stdin, not in an argument.
+              vks() { s=$1; shift; { sec "$s" username; echo; sec "$s" password; echo; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk "$@" 2>&1 || true; }
+              p=$(sec app-redis keyPrefix)
+              # Its own prefix: write and read back.
+              vks app-redis SET "${p}k" hello-from-e2e | grep -qx OK
+              vks app-redis GET "${p}k" | grep -qx hello-from-e2e
+              # Another tenant's keys, a name that only begins like the prefix,
+              # and the commands that list or reach beyond it are refused.
+              vks app-redis SET "other:k" x | grep -q NOPERM
+              vks app-redis GET "${NAMESPACE}x:k" | grep -q NOPERM
+              vks app-redis KEYS '*' | grep -q NOPERM
+              vks app-redis SCAN 0 | grep -q NOPERM
+              vks app-redis FLUSHALL | grep -q NOPERM
+              vks app-redis ACL LIST | grep -q NOPERM
+              vks app-redis CONFIG GET save | grep -q NOPERM
+              # A ReadOnly user reads what the other wrote and cannot write.
+              vks reader-redis GET "${p}k" | grep -qx hello-from-e2e
+              vks reader-redis SET "${p}k2" x | grep -q NOPERM
+              # Without channels there is no publish; with them, only under the
+              # prefix.
+              vks app-redis PUBLISH "${p}c" x | grep -q NOPERM
+              tp=$(sec team-user-redis keyPrefix)
+              vks team-user-redis PUBLISH "${tp}c" x | grep -qx 0
+              vks team-user-redis PUBLISH "other:c" x | grep -q NOPERM
+              vks team-user-redis SET "${tp}team" y | grep -qx OK
+
+    - name: a wrong password is refused
+      try:
+        - script:
+            content: |
+              set -eu
+              sec() { kubectl get secret "$1" -n "$NAMESPACE" -o "jsonpath={.data.$2}" | base64 -d; }
+              out=$({ sec app-redis username; echo; echo not-the-password; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk PING 2>&1 || true)
+              printf %s "$out" | grep -q WRONGPASS
+              if printf %s "$out" | grep -q PONG; then
+                echo "a login with a wrong password was accepted"
+                exit 1
+              fi
+
+    - name: a rotation keeps the old password through the grace period and issues a new one
+      try:
+        - script:
+            content: |
+              set -eu
+              umask 077
+              sec() { kubectl get secret app-redis -n "$NAMESPACE" -o "jsonpath={.data.$1}" | base64 -d; }
+              sec password > "${TMPDIR:-/tmp}/e2e-app-old-password-$NAMESPACE"
+              kubectl annotate cacheuser app -n "$NAMESPACE" craftainer.dev/rotate=e2e-1 --overwrite
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: app
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+                rotation:
+                  sequence: 1
+                  lastTrigger: e2e-1
+                  (retireAfter != `null`): true
+        - script:
+            timeout: 2m
+            content: |
+              set -eu
+              sec() { kubectl get secret app-redis -n "$NAMESPACE" -o "jsonpath={.data.$1}" | base64 -d; }
+              user=$(sec username)
+              old=$(cat "${TMPDIR:-/tmp}/e2e-app-old-password-$NAMESPACE")
+              new=$(sec password)
+              test -n "$new" -a "$new" != "$old"
+              p=$(sec keyPrefix)
+              # Both passwords log in during the grace period, and both stay
+              # inside the prefix.
+              out=$({ echo "$user"; echo "$new"; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk GET "${p}k" 2>&1 || true)
+              printf %s "$out" | grep -qx hello-from-e2e || { echo "the new password did not read the key: $out"; exit 1; }
+              out=$({ echo "$user"; echo "$old"; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk GET "${p}k" 2>&1 || true)
+              printf %s "$out" | grep -qx hello-from-e2e || { echo "the old password did not read the key: $out"; exit 1; }
+              # The user has exactly the two passwords.
+              info=$(kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL GETUSER "$user" 2>&1 || true)
+              n=$(printf %s "$info" | grep -cE '^[0-9a-f]{64}$' || true)
+              test "$n" = 2 || { echo "password hashes = $n; GETUSER said: $info"; exit 1; }
+
+    - name: deleting a CacheUser removes its user and ends its sessions
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: watcher
+              spec:
+                restartPolicy: Never
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 999
+                  runAsGroup: 999
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: cli
+                    image: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+                    # A long-lived client with the reader's binding. It reads a key
+                    # every second; when the server ends the session it exits and
+                    # says so.
+                    command: [sh, -c]
+                    args:
+                      - 'valkey-cli --tls --cacert /ca/ca.crt -h "$HOST" --user "$USER_NAME" --pass "$USER_PASS" --no-auth-warning -r 100000 -i 1 GET "${PREFIX}k"; echo "valkey-cli exited with $?"'
+                    env:
+                      - name: HOST
+                        valueFrom:
+                          secretKeyRef: {name: reader-redis, key: host}
+                      - name: USER_NAME
+                        valueFrom:
+                          secretKeyRef: {name: reader-redis, key: username}
+                      - name: USER_PASS
+                        valueFrom:
+                          secretKeyRef: {name: reader-redis, key: password}
+                      - name: PREFIX
+                        valueFrom:
+                          secretKeyRef: {name: reader-redis, key: keyPrefix}
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        drop: [ALL]
+                    volumeMounts:
+                      - {name: ca, mountPath: /ca, readOnly: true}
+                volumes:
+                  - name: ca
+                    secret:
+                      secretName: valkey-tls
+                      items:
+                        - {key: ca.crt, path: ca.crt}
+        - script:
+            timeout: 2m
+            content: |
+              set -eu
+              # The watcher is connected once it has read the key.
+              deadline=$(( $(date +%s) + 90 ))
+              until kubectl logs -n "$NAMESPACE" watcher 2>/dev/null | grep -q 'hello-from-e2e'; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "the watcher did not read its key"
+                  exit 1
+                fi
+                sleep 2
+              done
+        - script:
+            content: |
+              set -eu
+              # The reader's credentials, for the check after the claim is gone
+              # (kept in files nobody else can read, removed in the cleanup).
+              umask 077
+              sec() { kubectl get secret reader-redis -n "$NAMESPACE" -o "jsonpath={.data.$1}" | base64 -d; }
+              { sec username; echo; sec password; echo; } > "${TMPDIR:-/tmp}/e2e-reader-login-$NAMESPACE"
+              kubectl get cacheuser reader -n "$NAMESPACE" -o jsonpath='{.status.externalName}' > "${TMPDIR:-/tmp}/e2e-reader-name-$NAMESPACE"
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              name: reader
+        - error:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: reader-redis
+        - script:
+            timeout: 3m
+            content: |
+              set -eu
+              name=$(cat "${TMPDIR:-/tmp}/e2e-reader-name-$NAMESPACE")
+              test -n "$name"
+              # The deleted login stops working (a bounded retry: the server
+              # applies the deletion at once, the retry only covers the claim's
+              # deletion finishing).
+              deadline=$(( $(date +%s) + 60 ))
+              # The refusal itself is the positive signal: a failed exec prints
+              # neither PONG nor WRONGPASS and does not pass.
+              until kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk PING < "${TMPDIR:-/tmp}/e2e-reader-login-$NAMESPACE" 2>&1 | grep -q WRONGPASS; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "the deleted login is not refused"
+                  exit 1
+                fi
+                sleep 2
+              done
+              # Its open session was ended by the server: the watcher's client
+              # exited on its own.
+              deadline=$(( $(date +%s) + 60 ))
+              until kubectl logs -n "$NAMESPACE" watcher 2>/dev/null | grep -q 'valkey-cli exited'; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "the deleted login's session was not ended"
+                  exit 1
+                fi
+                sleep 2
+              done
+              # The user is gone from the server, whatever the operator's
+              # default deletionPolicy (Retain): a credential kind has none.
+              users=$(kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL LIST 2>&1)
+              printf %s "$users" | grep -qF "user admin " || { echo "ACL LIST did not answer: $users"; exit 1; }
+              if printf %s "$users" | grep -qF "user ${name} "; then
+                echo "the deleted claim's user is still on the server"
+                exit 1
+              fi
+              # The other users are untouched.
+              kubectl get cacheuser app team-user -n "$NAMESPACE" >/dev/null
+
+    - name: a name that the server already holds is a NameCollision, and the user it holds is left alone
+      try:
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: ghost
+              spec:
+                serverRef: {kind: ClusterCacheServer, name: e2e-valkey}
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: ghost
+              status:
+                (conditions[?type == 'Ready'] | [0].status): "True"
+        - script:
+            content: |
+              set -eu
+              umask 077
+              kubectl get cacheuser ghost -n "$NAMESPACE" -o jsonpath='{.status.externalName}' > "${TMPDIR:-/tmp}/e2e-ghost-name-$NAMESPACE"
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              name: ghost
+        - script:
+            timeout: 2m
+            content: |
+              set -eu
+              adm() { kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm "$@" 2>&1; }
+              name=$(cat "${TMPDIR:-/tmp}/e2e-ghost-name-$NAMESPACE")
+              test -n "$name"
+              # The claim removed its own user. Someone else now makes a user of
+              # the same name; the claim has no record of it.
+              list=$(adm ACL LIST)
+              printf %s "$list" | grep -qF "user admin " || { echo "ACL LIST did not answer: $list"; exit 1; }
+              if printf %s "$list" | grep -qF "user ${name} "; then
+                echo "the claim's own user was not deleted"
+                exit 1
+              fi
+              adm ACL SETUSER "$name" on '>e2e-foreign' '~foreign:*' '+@all' | grep -qx OK
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: ghost
+              spec:
+                serverRef: {kind: ClusterCacheServer, name: e2e-valkey}
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: ghost
+              status:
+                (conditions[?type == 'Synced'] | [0].status): "False"
+                (conditions[?type == 'Synced'] | [0].reason): NameCollision
+                (externalId == `null` || externalId == ''): true
+        - error:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: ghost
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              name: ghost
+        - script:
+            timeout: 2m
+            content: |
+              set -eu
+              adm() { kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm "$@" 2>&1; }
+              name=$(cat "${TMPDIR:-/tmp}/e2e-ghost-name-$NAMESPACE")
+              # The claim is gone, and the user it did not make is still there,
+              # unchanged: it still logs in with its own password, on its own
+              # keys. Positive checks: an exec that failed cannot pass as "still
+              # there".
+              out=$({ echo "$name"; echo e2e-foreign; } | kubectl exec -i -n "$NAMESPACE" deploy/vkc -- /m/vk SET foreign:k kept 2>&1)
+              printf %s "$out" | grep -qx OK || { echo "the foreign user was deleted or changed: $out"; exit 1; }
+              adm ACL GETUSER "$name" | grep -qF '~foreign:*' || { echo "the foreign user's rules changed"; exit 1; }
+              adm ACL DELUSER "$name" | grep -qx 1
+      cleanup:
+        - script:
+            content: |
+              name=$(cat "${TMPDIR:-/tmp}/e2e-ghost-name-$NAMESPACE" 2>/dev/null) || exit 0
+              kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL DELUSER "$name" >/dev/null 2>&1 || true
+
+    - name: a claim that never created anything is released, even when its server is gone
+      try:
+        - apply:
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: orphan
+              spec:
+                serverRef: {kind: CacheServer, name: no-such-server}
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              metadata:
+                name: orphan
+              status:
+                (conditions[?type == 'Synced'] | [0].status): "False"
+                (type(externalId) == 'null' || externalId == ''): true
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              name: orphan
+
+    - name: the remaining users and the servers are deleted
+      try:
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              name: app
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheUser
+              name: team-user
+        - script:
+            content: |
+              set -eu
+              # No user of the claims is left on the server: the admin and the
+              # default user (off) are the only ones.
+              users=$(kubectl exec -n "$NAMESPACE" deploy/vkc -- /m/adm ACL USERS 2>&1)
+              test "$(printf %s "$users" | grep -c .)" = 2
+              printf %s "$users" | grep -qx admin
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: CacheServer
+              name: team-valkey
+        - delete:
+            ref:
+              apiVersion: cache.craftainer.dev/v1alpha1
+              kind: ClusterCacheServer
+              name: e2e-valkey

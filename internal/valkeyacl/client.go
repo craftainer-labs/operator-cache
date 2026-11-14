@@ -353,9 +353,15 @@ func (a *Admin) DelUser(ctx context.Context, name string) (bool, error) {
 // AddPassword is the ACL rule that adds a password to a user.
 func AddPassword(password string) string { return ">" + password }
 
-// KeepOnly is the ACL rules that leave the user with the password that hashes
-// to hash, and no other.
-func KeepOnly(hash string) []string { return []string{"resetpass", "#" + hash} }
+// KeepOnly is the ACL rules that leave the user with the passwords that hash to
+// hashes, and no other.
+func KeepOnly(hashes ...string) []string {
+	rules := []string{"resetpass"}
+	for _, h := range hashes {
+		rules = append(rules, "#"+h)
+	}
+	return rules
+}
 
 // HashPassword is the SHA-256 hash of a password, in hex, as ACL GETUSER lists
 // it and as the "#" rule takes it.

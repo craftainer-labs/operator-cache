@@ -1,6 +1,7 @@
 # test/integration/
 
-Go tests of the operator's ACL client (`internal/valkeyacl`) against a real
+Go tests of the operator's ACL client (`internal/valkeyacl`) and of the
+controller's paths over it (`internal/controller`) against a real
 Valkey 9.1.2 with TLS and ACLs on, behind the build tag `integration` so
 `go test ./...` and the 100% coverage gate of `make test` never see them. The
 unit suites use an in-process server that speaks just enough RESP; ACL behaviour
@@ -25,10 +26,20 @@ is server-side, so this lane checks what that fake only claims, against Valkey:
 - an update that keeps the password and repairs rules someone widened by hand,
   and a delete that ends the user's sessions and leaves another user alone;
 - verified TLS: the system roots do not know the CA, a wrong host name fails, and
-  the server does not answer a plain connection.
+  the server does not answer a plain connection;
+- the controller's paths (`controller_test.go`, through `controller.Integration`,
+  which exists only with the `integration` tag and wires the External of a
+  `CacheUser` to the real server and an in-memory binding Secret): create, with a
+  real login confined to its prefix; a change of the profile that keeps the
+  password; a widened user noticed and repaired; a rotation (both passwords log
+  in, a retry, also after the Secret was written, keeps the passwords in use, the retire ends the old one,
+  and a retire with a password the server does not list changes nothing); a
+  create that crashed and is finished; a user without a record refused as a
+  `NameCollision` and left unchanged; delete ending the user and its sessions.
 
 Files:
 
+- `controller_test.go` — the controller's paths, as above.
 - `valkey_test.go` — the environment, the client of a tenant's application and
   the tests. They read `VALKEY_ADDRESS` (default `localhost:6379`),
   `VALKEY_CA_FILE` (required), `VALKEY_ADMIN_USERNAME` (default `admin`) and
