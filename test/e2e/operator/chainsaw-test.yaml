@@ -688,9 +688,10 @@ spec:
                 name: app
               status:
                 (conditions[?type == 'Ready'] | [0].status): "True"
-                (rotation.sequence == `1`): true
-                (rotation.lastTrigger == 'e2e-1'): true
-                (rotation.retireAfter != `null`): true
+                rotation:
+                  sequence: 1
+                  lastTrigger: e2e-1
+                  (retireAfter != `null`): true
         - script:
             timeout: 2m
             content: |
