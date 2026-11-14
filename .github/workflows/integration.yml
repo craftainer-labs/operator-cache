@@ -1,0 +1,121 @@
+# The operator's ACL client against a real Valkey (NO5b): the version of the
+# dev stack (NR4), pinned by digest, with TLS on (a CA and server certificate
+# generated in the job), ACLs on (an ACL file holding one administrator, with a
+# password generated in the job, and "default" off), and the client verifying
+# the certificate chain and host name. The tests are test/integration (build tag
+# `integration`); the certificates, the admin password and the server's
+# configuration are the files in test/integration/.
+#
+# Instance-owned: listed in .github/template-sync-manifest.local.yml, so
+# template sync never replaces it. A step-started container rather than a
+# `services:` container, because a service container starts before the
+# checkout and so cannot be handed the generated certificates or the
+# configuration.
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # renovate: datasource=docker depName=valkey/valkey
+  VALKEY_IMAGE: valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11
+  # The version scripts/develop.d/10-go.sh installs for the checks lane.
+  # renovate: datasource=github-releases depName=golangci/golangci-lint
+  GOLANGCI_LINT_VERSION: 2.15.0
+
+jobs:
+  valkey:
+    name: Valkey with TLS and ACLs
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER_AMD64 || 'ubuntu-24.04' }}
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # The checks lane lints with the default build tags, so test/integration
+      # (build tag `integration`) is only compiled and linted here. Same
+      # release, checksum-verified like scripts/develop.d/10-go.sh, and the
+      # repository's .golangci.yml.
+      - name: Install golangci-lint
+        run: |
+          set -euo pipefail
+          dir="golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64"
+          base="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}"
+          tmp="$RUNNER_TEMP/golangci-lint"
+          mkdir -p "$tmp"
+          curl -LsSf -o "$tmp/$dir.tar.gz" "$base/$dir.tar.gz"
+          curl -LsSf -o "$tmp/checksums.txt" "$base/golangci-lint-${GOLANGCI_LINT_VERSION}-checksums.txt"
+          (cd "$tmp" && awk -v f="$dir.tar.gz" '$2 == f' checksums.txt | sha256sum -c -)
+          tar -xzf "$tmp/$dir.tar.gz" -C "$tmp"
+          echo "$tmp/$dir" >> "$GITHUB_PATH"
+
+      - name: Lint the integration tests
+        run: golangci-lint run --build-tags integration ./test/integration/...
+
+      - name: Generate the CA, the server certificate, the admin password and the ACL file
+        run: |
+          set -euo pipefail
+          test/integration/gen-certs.sh "$RUNNER_TEMP/valkey-tls"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/valkey-tls/admin-password")"
+
+      - name: Start Valkey with TLS and ACLs
+        run: |
+          set -euo pipefail
+          docker run -d --name valkey -p 127.0.0.1:6379:6379 \
+            -v "$RUNNER_TEMP/valkey-tls:/tls:ro" \
+            -v "$PWD/test/integration/valkey.conf:/etc/valkey/valkey.conf:ro" \
+            "$VALKEY_IMAGE" valkey-server /etc/valkey/valkey.conf
+          for _ in $(seq 1 30); do
+            if [ "$(docker inspect -f '{{.State.Running}}' valkey)" != "true" ]; then
+              docker logs valkey
+              echo "Valkey exited" >&2
+              exit 1
+            fi
+            if docker exec -e REDISCLI_AUTH="$(cat "$RUNNER_TEMP/valkey-tls/admin-password")" valkey \
+                valkey-cli --tls --cacert /tls/ca.crt --user admin --no-auth-warning ping 2>/dev/null | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs valkey
+          echo "Valkey did not answer a PING over TLS" >&2
+          exit 1
+
+      - name: Run the integration tests
+        run: |
+          set -euo pipefail
+          export VALKEY_ADDRESS=localhost:6379
+          export VALKEY_CA_FILE="$RUNNER_TEMP/valkey-tls/ca.crt"
+          export VALKEY_ADMIN_USERNAME=admin
+          export VALKEY_ADMIN_PASSWORD_FILE="$RUNNER_TEMP/valkey-tls/admin-password"
+          go test -tags integration -race -count=1 -v -timeout 15m \
+            -coverpkg=./internal/valkeyacl/ -coverprofile="$RUNNER_TEMP/integration.cover" \
+            ./test/integration/...
+          go tool cover -func="$RUNNER_TEMP/integration.cover" | tail -n 1
+
+      - name: Show the server log
+        if: failure()
+        run: docker logs valkey
+
+      - name: Remove the server
+        if: always()
+        run: docker rm -f valkey

@@ -1,0 +1,7 @@
+# This instance's own paths, in the `ignore` tier only (same format as
+# template-sync-manifest.yml): read by the completeness check, never by sync.
+ignore:
+  # The real-Valkey integration lane (NO5b): the workflow and the files it
+  # starts the server from.
+  - .github/workflows/integration.yml
+  - test/integration/
