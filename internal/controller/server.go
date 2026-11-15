@@ -21,10 +21,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
-	"github.com/craftainer-labs/operator-cache/internal/egress"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
 )
 

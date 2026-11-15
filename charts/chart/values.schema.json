@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "egressMode": {
-      "description": "The manager's EGRESS_MODE (internal/egress ParseMode; empty means strict).",
+      "description": "The manager's EGRESS_MODE (lib-operator-go pkg/egress ParseMode; empty means strict).",
       "type": "string",
       "enum": ["", "strict", "allow-private"]
     },

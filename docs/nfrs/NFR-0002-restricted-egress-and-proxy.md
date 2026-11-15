@@ -24,7 +24,9 @@ A namespaced CacheServer lets a tenant name any host. Decided by the user on
 - An IPv6 address that carries an IPv4 address is checked as that IPv4 address:
   IPv4-mapped (`::ffff:`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4
   (`2002::/16`) and Teredo (`2001::/32`). The always-blocked set also holds
-  192.0.0.0/24, 198.18.0.0/15 and 168.63.129.16.
+  192.0.0.0/24, 198.18.0.0/15, the documentation ranges, SIIT (`::ffff:0:0:0/96`) and the
+  metadata addresses 168.63.129.16 and `fd20:ce::254`. A proxied target with a zone or a non-canonical
+  port is refused.
 - The environment variable `EGRESS_MODE` selects what is blocked. `strict`, the
   default, blocks loopback, link-local (which holds the cloud metadata address
   169.254.169.254), the other metadata addresses, multicast and reserved
@@ -51,12 +53,11 @@ review); plan rows EB-3 and EB-5;
 
 ## Verification
 
-`TestPolicyCheck`, `TestControl`, `TestDirectDialIsCheckedAfterResolution`,
-`TestHTTPProxyTunnel`, `TestHTTPSProxyTunnel`, `TestSOCKS5ChecksTheDestination`,
-`TestCheckTarget`, `TestProxyAddrDefaultPorts`, `TestProxyUserinfoAndScheme`,
-`TestHostDialerWithoutAProxyIsTheDialer` and
-`TestHostDialerResolvesBeforeTheProxy` (`internal/egress`) cover the range
-tables of both modes and the dialers. `TestCacheServerValidator`,
+The range tables of both modes and the dialers are covered where the policy lives, in
+lib-operator-go `pkg/egress` (`TestPolicyCheckRegistryRows`, `TestControl`,
+`TestDirectDialIsCheckedAfterResolution`, `TestHTTPProxyTunnel`, `TestSOCKS5ChecksTheDestination`,
+`TestCheckTarget`, `TestProxyUserinfoAndScheme`, `TestHostDialerResolvesBeforeTheProxy`).
+`TestCacheServerValidator`,
 `TestClusterCacheServerValidator` and `TestServerErrorsDoNotEchoTheValues`
 (`internal/webhook/v1alpha1`) show that a host
 with a scheme, a port or userinfo, and a proxy URL with credentials, are refused
