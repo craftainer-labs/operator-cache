@@ -149,11 +149,17 @@ type guardedConn struct {
 	net.Conn
 	guard   replyGuard
 	onLimit func()
+	// err is the violation, kept so that no later Read parses past it.
+	err error
 }
 
 func (c *guardedConn) Read(p []byte) (int, error) {
+	if c.err != nil {
+		return 0, c.err
+	}
 	n, err := c.Conn.Read(p)
 	if gerr := c.guard.feed(p[:n]); gerr != nil {
+		c.err = gerr
 		c.onLimit()
 		_ = c.Close()
 		return 0, gerr

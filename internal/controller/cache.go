@@ -31,6 +31,9 @@ type ServerCache struct {
 	entries map[string]*cacheEntry
 	// locks holds the lock of every key a Get is using or waiting for.
 	locks map[string]*keyLock
+	// closed is set when Start has shut down: nothing is sweeping any more, so a
+	// Get no longer caches what it builds.
+	closed bool
 }
 
 // keyLock is a lock that a waiter can give up on: a channel of one slot, and
@@ -95,6 +98,10 @@ func (c *ServerCache) Get(ctx context.Context, key, version string, build func(c
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return b, b.Close, nil
+	}
+	now = c.now()
 	e := &cacheEntry{version: version, server: b, used: now}
 	c.entries[key] = e
 	return c.lease(e, now)
@@ -203,6 +210,7 @@ func (c *ServerCache) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			c.mu.Lock()
+			c.closed = true
 			for k := range c.entries {
 				c.retire(k)
 			}

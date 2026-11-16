@@ -373,3 +373,27 @@ func TestServerCacheLocksPerKey(t *testing.T) {
 		t.Errorf("%d locks left", len(c.locks))
 	}
 }
+
+func TestServerCacheDoesNotCacheAfterShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := NewServerCache(time.Minute)
+	ticks := make(chan time.Time)
+	c.tick = func(time.Duration) (<-chan time.Time, func()) { return ticks, func() {} }
+	done := make(chan error)
+	go func() { done <- c.Start(ctx) }()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	v, release, err := c.Get(context.Background(), "k", "v", func(context.Context) (Valkey, error) { return newMemValkey(), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Len() != 0 {
+		t.Errorf("len = %d: a connection built after shutdown was cached", c.Len())
+	}
+	release()
+	if v.(*memValkey).closed != 1 {
+		t.Errorf("closed = %d after the release", v.(*memValkey).closed)
+	}
+}

@@ -109,6 +109,10 @@ func TestGuardedConn(t *testing.T) {
 	if _, err := server.Write([]byte("x")); err == nil {
 		t.Error("the connection is still open")
 	}
+	// The violation is kept: a later Read parses nothing more.
+	if n, err := c.Read(buf); n != 0 || !errors.Is(err, ErrReplyLimit) || limits != 1 {
+		t.Fatalf("second read: %d, %v, %d", n, err, limits)
+	}
 }
 
 func TestGuardedConnPassesAnErrorOn(t *testing.T) {
