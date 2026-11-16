@@ -536,16 +536,17 @@ func (e *userExternal) currentPassword(ctx context.Context) (string, error) {
 
 // RotateBegin implements lifecycle.Rotator: with a usable binding Secret the user
 // keeps every password it has beside a new one, so every credential a consumer
-// may still hold works through the grace period. What is "previous" comes from the server, not from the
-// binding Secret: the lifecycle writes the Secret before it marks it and before
-// it records the rotation, so a retry after a crash between those steps finds
-// the Secret holding the new password of the first attempt. Keeping only the
-// Secret's password would drop the one the consumers still use. The passwords
-// of a failed attempt that nobody was given stay until RotateFinish, which keeps
-// only the password of the Secret. With no usable binding Secret (missing, or of
-// another user) no consumer holds a valid credential, so no grace password is
-// worth keeping: "resetpass" plus the new password leaves the user with exactly
-// the new one, and a hash the operator does not know is removed.
+// may still hold works through the grace period. What is "previous" comes from
+// the server, not from the binding Secret: the lifecycle writes the Secret before
+// it marks it and before it records the rotation, so a retry after a crash
+// between those steps finds the Secret holding the new password of the first
+// attempt. Keeping only the Secret's password would drop the one the consumers
+// still use. The passwords of a failed attempt that nobody was given stay until
+// RotateFinish, which keeps only the password of the Secret. With no usable
+// binding Secret (missing, or of another user) no consumer holds a valid
+// credential, so no grace password is worth keeping: "resetpass" plus the new
+// password leaves the user with exactly the new one, and a hash the operator
+// does not know is removed.
 func (e *userExternal) RotateBegin(ctx context.Context, _ cachev1alpha1.CacheUserSpec, _ userState, st lifecycle.RotationState) (binding.Data, lifecycle.Generation, error) {
 	data, err := e.begin(ctx)
 	if err != nil {
