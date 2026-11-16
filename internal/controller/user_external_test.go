@@ -638,7 +638,7 @@ func TestUserExternalPasswordDrift(t *testing.T) {
 		},
 		"marked": func() {
 			e.claim.SetRotationStatus(common.RotationStatus{Sequence: 3})
-			holding(e, secretOf(pw, true, map[string]string{annotationRotationSequence: "4"}))
+			holding(e, secretOf(pw, true, map[string]string{lifecycle.AnnotationRotationSequence: "4"}))
 		},
 	} {
 		set()
@@ -650,7 +650,7 @@ func TestUserExternalPasswordDrift(t *testing.T) {
 	}
 	// A mark of another sequence is not a rotation in flight.
 	e.claim.SetRotationStatus(common.RotationStatus{Sequence: 3})
-	holding(e, secretOf(pw, true, map[string]string{annotationRotationSequence: "3"}))
+	holding(e, secretOf(pw, true, map[string]string{lifecycle.AnnotationRotationSequence: "3"}))
 	if _, ok := observed(t, e); ok {
 		t.Error("a past mark keeps an extra password")
 	}
