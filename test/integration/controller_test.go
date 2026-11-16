@@ -384,7 +384,7 @@ func TestControllerNameCollision(t *testing.T) {
 
 // A create that crashed after the SETUSER, before the claim recorded the name, is
 // finished: the intent was recorded, so the user is the claim's, and with no
-// binding Secret the rotation adds a password that is then the only one.
+// binding Secret the rotation resets the passwords and gives a new one, the only one.
 func TestControllerFinishesACreateThatCrashed(t *testing.T) {
 	i, a, s, ns := newClaim(t)
 	name := i.Claim().GetExternalName()
@@ -411,7 +411,11 @@ func TestControllerFinishesACreateThatCrashed(t *testing.T) {
 		t.Errorf("externalId = %q", i.Claim().GetExternalID())
 	}
 	i.Binding = data
-	loginOK(t, s, name, crashedPW)
+	// No Secret was ever written, so nobody holds the crashed attempt's password:
+	// RotateBegin leaves the user with the new one alone.
+	if _, err := s.login(name, crashedPW); err == nil {
+		t.Fatal("the password of the crashed attempt still logs in after RotateBegin")
+	}
 	if err := i.RotateFinish(bg, readWrite, obs.Current, lifecycle.RotationState{Active: "1", Sequence: 1}); err != nil {
 		t.Fatal(err)
 	}
