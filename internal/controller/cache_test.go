@@ -284,3 +284,116 @@ func TestNilServerCache(t *testing.T) {
 	}
 	c.Forget("k")
 }
+
+// Concurrent Gets for one key build one connection: the others wait for the
+// build and find it. The test passes whatever the order the goroutines run in;
+// a cache that built twice would fail it in the orders where they overlap.
+func TestServerCacheBuildsOnceForConcurrentGets(t *testing.T) {
+	ctx := context.Background()
+	c := NewServerCache(time.Minute)
+	var builds atomic.Int32
+	started, gate := make(chan struct{}), make(chan struct{})
+	build := func(context.Context) (Valkey, error) {
+		if builds.Add(1) == 1 {
+			close(started)
+		}
+		<-gate
+		return newMemValkey(), nil
+	}
+	var wg sync.WaitGroup
+	got := make([]Valkey, 8)
+	get := func(i int) {
+		defer wg.Done()
+		v, release, err := c.Get(ctx, "k", "v", build)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		got[i] = v
+		release()
+	}
+	wg.Add(1)
+	go get(0)
+	<-started
+	for i := 1; i < len(got); i++ {
+		wg.Add(1)
+		go get(i)
+	}
+	close(gate)
+	wg.Wait()
+	if builds.Load() != 1 {
+		t.Errorf("builds = %d", builds.Load())
+	}
+	for i, v := range got {
+		if v != got[0] {
+			t.Errorf("Get %d got another connection", i)
+		}
+	}
+}
+
+// A build for one key does not hold up another key, and a Get that waits for a
+// key gives up when its context ends. The locks are gone when the Gets are.
+func TestServerCacheLocksPerKey(t *testing.T) {
+	c := NewServerCache(time.Minute)
+	started, gate := make(chan struct{}), make(chan struct{})
+	slow := func(context.Context) (Valkey, error) {
+		close(started)
+		<-gate
+		return newMemValkey(), nil
+	}
+	done := make(chan error)
+	go func() {
+		_, release, err := c.Get(context.Background(), "slow", "v", slow)
+		if err == nil {
+			release()
+		}
+		done <- err
+	}()
+	<-started
+
+	_, release, err := c.Get(context.Background(), "fast", "v", func(context.Context) (Valkey, error) { return newMemValkey(), nil })
+	if err != nil {
+		t.Fatalf("another key waited for the build: %v", err)
+	}
+	release()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := c.Get(cancelled, "slow", "v", slow); !errors.Is(err, context.Canceled) {
+		t.Errorf("a waiting Get: %v", err)
+	}
+
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.locks) != 0 {
+		t.Errorf("%d locks left", len(c.locks))
+	}
+}
+
+func TestServerCacheDoesNotCacheAfterShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := NewServerCache(time.Minute)
+	ticks := make(chan time.Time)
+	c.tick = func(time.Duration) (<-chan time.Time, func()) { return ticks, func() {} }
+	done := make(chan error)
+	go func() { done <- c.Start(ctx) }()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	v, release, err := c.Get(context.Background(), "k", "v", func(context.Context) (Valkey, error) { return newMemValkey(), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Len() != 0 {
+		t.Errorf("len = %d: a connection built after shutdown was cached", c.Len())
+	}
+	release()
+	if v.(*memValkey).closed != 1 {
+		t.Errorf("closed = %d after the release", v.(*memValkey).closed)
+	}
+}

@@ -53,6 +53,11 @@ Security (access control, audit, secrets, plan rows EB-2, EB-4 and EB-9).
 - A cached server connection is closed when it is replaced, forgotten or idle for
   ten minutes (a sweeper that every replica runs), never while a reconcile holds
   it; the number of concurrent reconciles is `--max-concurrent-reconciles`.
+  Concurrent reconciles for one server build one connection (a lock per server).
+- The operator reads at most 1 MiB, 4096 array elements and 4096 bytes of a line
+  in one reply of a server, and only RESP2, whatever the server sends: a header
+  that declares more is refused before valkey-go allocates for it. The result is
+  `valkeyacl.ErrReplyLimit`, shown as one fixed text.
 
 ## Source
 
@@ -73,6 +78,7 @@ proxy credential; `TestUserUpdateWithoutAValidSecretRotates` and `TestUserUpdate
 check that a change never resets the password; `TestUserRotateBegin` and
 `TestUserRotateFinish` check that a retried rotation drops only the failed
 attempt's password and that a retire with an unknown hash changes nothing;
-`TestServerCache*` (`internal/controller`) cover the lease-counted cache and its
-sweeper. The e2e lane installs the chart as an arbitrary UID under Pod Security
+`TestServerCache*` (`internal/controller`) cover the lease-counted cache, its lock
+per server and its sweeper; `TestGuard*` and `TestVersionBoundsTheReply`
+(`internal/valkeyacl`) cover the reply limits. The e2e lane installs the chart as an arbitrary UID under Pod Security
 `restricted` and checks the rotation against a real server.

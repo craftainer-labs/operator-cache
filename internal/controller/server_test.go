@@ -102,6 +102,7 @@ func TestCoarse(t *testing.T) {
 		{"unavailable", wrap(valkeyacl.ErrUnavailable), "the connection to the server failed", true},
 		{"invalid", wrap(valkeyacl.ErrInvalid), "the server refused the request", false},
 		{"server", wrap(valkeyacl.ErrServer), "the server reported an error", false},
+		{"reply limit", wrap(valkeyacl.ErrReplyLimit), "the server's reply was over the operator's limits", false},
 		{"unknown", errors.New(leak), defaultText, false},
 	}
 	for _, tc := range cases {

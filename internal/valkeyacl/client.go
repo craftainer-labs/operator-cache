@@ -87,6 +87,9 @@ type Admin struct {
 	// replaces the Admin rather than wait for that.
 	down   atomic.Bool
 	closed atomic.Bool
+	// limit is set by the connection when a reply broke the limits of the guard,
+	// and says so to the command whose connection failed.
+	limit atomic.Bool
 }
 
 // roots returns the pool that verifies the server: the PEM bundle, or nil for
@@ -122,13 +125,16 @@ func Connect(ctx context.Context, cfg Config) (*Admin, error) {
 	// What the last dial failed with: valkey-go reports an unreachable server
 	// as its own "unable to connect" error, so the cause is kept here.
 	var dialErr atomic.Pointer[error]
+	a := &Admin{timeout: cfg.Timeout, user: cmp.Or(cfg.Username, "default")}
 	cause := func(err error) error {
+		if a.limit.Load() {
+			return fmt.Errorf("%w: connect", ErrReplyLimit)
+		}
 		if e := dialErr.Load(); e != nil {
 			return *e
 		}
 		return err
 	}
-	a := &Admin{timeout: cfg.Timeout, user: cmp.Or(cfg.Username, "default")}
 	cli, err := valkey.NewClient(valkey.ClientOption{
 		InitAddress:       []string{cfg.Address},
 		Username:          cfg.Username,
@@ -140,7 +146,7 @@ func Connect(ctx context.Context, cfg Config) (*Admin, error) {
 		DisableRetry:      true,
 		Dialer:            net.Dialer{Timeout: cfg.Timeout},
 		DialCtxFn: func(ctx context.Context, addr string, _ *net.Dialer, _ *tls.Config) (net.Conn, error) {
-			conn, err := dialTLS(ctx, cfg, addr, tlsConfig)
+			conn, err := dialTLS(ctx, cfg, addr, tlsConfig, func() { a.limit.Store(true) })
 			if err != nil {
 				dialErr.Store(&err)
 			}
@@ -159,7 +165,9 @@ func Connect(ctx context.Context, cfg Config) (*Admin, error) {
 }
 
 // dialTLS connects through the dialer of the config and verifies the server.
-func dialTLS(ctx context.Context, cfg Config, addr string, tlsConfig *tls.Config) (net.Conn, error) {
+// The connection it returns checks every reply against the limits of guard.go;
+// onLimit is called when one breaks them.
+func dialTLS(ctx context.Context, cfg Config, addr string, tlsConfig *tls.Config, onLimit func()) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 	raw, err := cfg.Dial(ctx, "tcp", addr)
@@ -171,7 +179,7 @@ func dialTLS(ctx context.Context, cfg Config, addr string, tlsConfig *tls.Config
 		_ = raw.Close()
 		return nil, transport("tls", err)
 	}
-	return tc, nil
+	return &guardedConn{Conn: tc, onLimit: onLimit}, nil
 }
 
 // Alive reports whether the connection is usable: not closed and not one that
@@ -206,6 +214,9 @@ func (a *Admin) do(ctx context.Context, name string, secret bool, args ...string
 			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 		if _, ok := valkey.IsValkeyErr(err); !ok && !callerGaveUp {
 			a.down.Store(true)
+		}
+		if a.limit.CompareAndSwap(true, false) {
+			return msg, fmt.Errorf("%w: %s", ErrReplyLimit, name)
 		}
 		return msg, reply(name, err, secret)
 	}

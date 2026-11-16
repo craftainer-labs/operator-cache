@@ -145,7 +145,8 @@ from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind, wired i
   printable ASCII without spaces, or that neither command gives, leaves
   `status.serverVersion` empty; the server is still `Ready` and reachable,
   because reachability and accepted credentials are what the conditions say.
-  Only a connection that fails during the read makes the probe fail.
+  Only a connection that fails during the read, or a reply over the limits of
+  "A server's reply is bounded" below, makes the probe fail.
 - `status.lastProbeTime`: the last probe that ran and whose result was recorded
   (a server that cannot be probed, `InvalidServer`, has none). It is rewritten
   when the result changes and otherwise every 10 minutes, so a healthy fleet does
@@ -202,13 +203,24 @@ from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind, wired i
   object and the binding Secrets, not the Secrets a server names. A changed
   server spec is seen at once, and a changed credential replaces the connection
   at the next reconcile.
-- **A server that does not answer holds up other users for the connect timeout
-  (ten seconds),** because the controller runs one worker unless
-  `--max-concurrent-reconciles` is raised and the connection cache connects with
-  its lock held. The cache is safe for concurrent reconciles: a connection that
-  is replaced while a reconcile uses it is closed when that reconcile ends, and a
-  timer (checking every five minutes) closes the connections nobody has used for
-  ten minutes.
+- **A server that does not answer holds up the other users of that server for
+  the connect timeout (ten seconds),** because the connection cache builds one
+  connection per server at a time (a lock per server, so concurrent reconciles
+  for it build one connection, not several) and the controller runs one worker
+  unless `--max-concurrent-reconciles` is raised. Users of another server are
+  not held up by the cache. The cache is safe for concurrent reconciles: a
+  connection that is replaced while a reconcile uses it is closed when that
+  reconcile ends, and a timer (checking every five minutes) closes the
+  connections nobody has used for ten minutes.
+- **A server's reply is bounded.** valkey-go has no limit of its own and
+  allocates what a reply declares, so the operator checks the stream of every
+  connection before valkey-go reads it: one reply may be at most 1 MiB, declare
+  at most 4096 array elements and have no simple line over 4096 bytes, and it
+  must be RESP2 (the connection never asks for more). A reply over a limit closes
+  the connection and is an error of one fixed kind ("the server's reply was over
+  the operator's limits"), from the claim path and from the probe alike. The
+  replies the operator reads (`INFO server`, `HELLO`, `ACL GETUSER`) are a few
+  kilobytes.
 
 ## Install
 
