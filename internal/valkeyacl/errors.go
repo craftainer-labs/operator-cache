@@ -34,6 +34,11 @@ var (
 	// ErrTimeout means the server did not answer in time. The command may or
 	// may not have been applied, so the caller observes before it retries.
 	ErrTimeout = errors.New("valkey: timed out")
+	// ErrReplyLimit means a reply of the server was over the client's limits (a
+	// megabyte, 4096 array elements, 4096 bytes of a line) or was not RESP2. The
+	// connection is closed; nothing of the reply
+	// is kept or shown, so the error holds no more than the command's name.
+	ErrReplyLimit = errors.New("valkey: reply over the client's limits")
 )
 
 // transport wraps an error of the dial, the handshake or the connection: a

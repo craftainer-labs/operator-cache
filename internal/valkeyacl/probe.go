@@ -17,7 +17,9 @@ const maxVersion = 64
 // administrator's ACL does not allow it, HELLO, which sits in the connection
 // category and so stays open to a narrow ACL. A refused or unreadable answer, a
 // version that is not plain ASCII, or one over 64 bytes gives "" and no error.
-// Only a connection that fails is an error.
+// A connection that fails is an error, and so is a reply over the limits of the
+// client (ErrReplyLimit): the connection never reads more than a megabyte of
+// one reply, so the text parsed here is bounded too.
 func (a *Admin) Version(ctx context.Context) (string, error) {
 	msg, err := a.do(ctx, "INFO", false, "server")
 	if err == nil {
@@ -39,10 +41,10 @@ func (a *Admin) Version(ctx context.Context) (string, error) {
 	return cleanVersion(helloVersion(msg)), nil
 }
 
-// lost reports a failure of the connection itself, as opposed to an answer of
-// the server.
+// lost reports a failure of the connection itself (or one it was closed for),
+// as opposed to an answer of the server.
 func lost(err error) bool {
-	return errors.Is(err, ErrUnavailable) || errors.Is(err, ErrTimeout)
+	return errors.Is(err, ErrUnavailable) || errors.Is(err, ErrTimeout) || errors.Is(err, ErrReplyLimit)
 }
 
 // infoVersion reads the version out of the text of INFO server: valkey_version

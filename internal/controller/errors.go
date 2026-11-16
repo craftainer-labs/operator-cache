@@ -99,6 +99,7 @@ var rules = []rule{
 	{is(valkeyacl.ErrUnavailable), "the connection to the server failed", true},
 	{is(valkeyacl.ErrInvalid), "the server refused the request", false},
 	{is(valkeyacl.ErrServer), "the server reported an error", false},
+	{is(valkeyacl.ErrReplyLimit), "the server's reply was over the operator's limits", false},
 }
 
 // defaultText is shown for an error no rule knows: a failed call of the

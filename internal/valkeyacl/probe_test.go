@@ -176,3 +176,52 @@ func TestVersionIgnoresAnswersOfTheWrongShape(t *testing.T) {
 		}
 	}
 }
+
+// A reply over the limits of the client is an error of its own kind, from INFO
+// or from HELLO, with no more than the command's name in it, and the
+// connection is no longer alive, so a cache replaces it. A header that
+// declares a gigabyte is refused before anything is allocated for it.
+func TestVersionBoundsTheReply(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw    map[string]string
+		denied map[string]bool
+		want   string
+	}{
+		"info declares a gigabyte": {raw: map[string]string{"INFO": "$1073741824\r\n"}, want: "INFO"},
+		"info is over a megabyte":  {raw: map[string]string{"INFO": bulk(strings.Repeat("a", 2<<20))}, want: "INFO"},
+		"info is not RESP2":        {raw: map[string]string{"INFO": "%1\r\n"}, want: "INFO"},
+		"hello has too many items": {raw: map[string]string{"HELLO": "*100000\r\n"}, denied: map[string]bool{"INFO": true}, want: "HELLO"},
+	} {
+		f := newFake(t)
+		a := connect(t, f)
+		f.with(func(f *fake) { f.raw, f.denied = tc.raw, tc.denied })
+		_, err := a.Version(context.Background())
+		if !errors.Is(err, valkeyacl.ErrReplyLimit) || err.Error() != "valkey: reply over the client's limits: "+tc.want {
+			t.Errorf("%s: %v", name, err)
+		}
+		if a.Alive() {
+			t.Errorf("%s: the connection is still alive", name)
+		}
+	}
+}
+
+// A server whose login already answers over the limits cannot be connected to,
+// and the probe reports it.
+func TestConnectBoundsTheHandshake(t *testing.T) {
+	f := newFake(t)
+	f.with(func(f *fake) { f.raw = map[string]string{"HELLO": "$1073741824\r\n"} })
+	_, err := valkeyacl.Probe(context.Background(), f.cfg())
+	if !errors.Is(err, valkeyacl.ErrReplyLimit) || err.Error() != "valkey: reply over the client's limits: connect" {
+		t.Fatalf("%v", err)
+	}
+}
+
+// The claim path is bounded too: ACL GETUSER with a reply over the limits.
+func TestGetUserBoundsTheReply(t *testing.T) {
+	f := newFake(t)
+	a := connect(t, f)
+	f.with(func(f *fake) { f.garbage = "*5000\r\n" })
+	if _, err := a.GetUser(context.Background(), "tenant-user"); !errors.Is(err, valkeyacl.ErrReplyLimit) {
+		t.Fatalf("%v", err)
+	}
+}

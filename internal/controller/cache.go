@@ -19,12 +19,25 @@ import (
 // An entry nobody holds a lease on and nobody used for the idle time is closed
 // by the next Get or by the sweep that Start runs. A nil *ServerCache caches
 // nothing: its leases close the connection on release.
+//
+// Concurrent Gets for one key run one at a time (a lock per key), so a server's
+// connection is built once and the others find it; a Get for another key does
+// not wait for that build, and a Get that waits gives up when its context ends.
 type ServerCache struct {
 	mu      sync.Mutex
 	idle    time.Duration
 	now     func() time.Time
 	tick    func(time.Duration) (<-chan time.Time, func())
 	entries map[string]*cacheEntry
+	// locks holds the lock of every key a Get is using or waiting for.
+	locks map[string]*keyLock
+}
+
+// keyLock is a lock that a waiter can give up on: a channel of one slot, and
+// the number of Gets that use it, so the last one removes it from the map.
+type keyLock struct {
+	slot chan struct{}
+	refs int
 }
 
 type cacheEntry struct {
@@ -37,7 +50,7 @@ type cacheEntry struct {
 
 // NewServerCache returns a cache that closes an unused entry idle for longer than idle.
 func NewServerCache(idle time.Duration) *ServerCache {
-	return &ServerCache{idle: idle, now: time.Now, tick: newTicker, entries: map[string]*cacheEntry{}}
+	return &ServerCache{idle: idle, now: time.Now, tick: newTicker, entries: map[string]*cacheEntry{}, locks: map[string]*keyLock{}}
 }
 
 func newTicker(d time.Duration) (<-chan time.Time, func()) {
@@ -49,9 +62,11 @@ func newTicker(d time.Duration) (<-chan time.Time, func()) {
 // version and is alive, else connects through build, replaces the entry and
 // retires the old connection. The caller calls the release function once it is
 // done with the connection, and not before. A failed build caches nothing.
-// build runs with the lock held: a server that does not answer holds up the
-// other servers' reconciles for the connect timeout, which is the price of a
-// cache without a second lock.
+// build runs with the key's lock held and the cache's lock free: a server that
+// does not answer holds up only the Gets for its own key, for the connect
+// timeout, and they find its connection once the first has built it. A Forget
+// during a build does not stop it: the connection it makes is cached and is
+// closed by the idle sweep.
 func (c *ServerCache) Get(ctx context.Context, key, version string, build func(context.Context) (Valkey, error)) (Valkey, func(), error) {
 	if c == nil {
 		b, err := build(ctx)
@@ -60,21 +75,56 @@ func (c *ServerCache) Get(ctx context.Context, key, version string, build func(c
 		}
 		return b, b.Close, nil
 	}
+	unlock, err := c.lock(ctx, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	now := c.now()
 	c.sweep(now)
 	if e, ok := c.entries[key]; ok && e.version == version && e.server.Alive() {
+		defer c.mu.Unlock()
 		return c.lease(e, now)
 	}
 	c.retire(key)
+	c.mu.Unlock()
 	b, err := build(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	e := &cacheEntry{version: version, server: b, used: now}
 	c.entries[key] = e
 	return c.lease(e, now)
+}
+
+// lock takes the lock of key, or gives up when ctx ends first. The function it
+// returns unlocks. The caller does not hold mu.
+func (c *ServerCache) lock(ctx context.Context, key string) (func(), error) {
+	c.mu.Lock()
+	l, ok := c.locks[key]
+	if !ok {
+		l = &keyLock{slot: make(chan struct{}, 1)}
+		c.locks[key] = l
+	}
+	l.refs++
+	c.mu.Unlock()
+	done := func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if l.refs--; l.refs == 0 {
+			delete(c.locks, key)
+		}
+	}
+	select {
+	case l.slot <- struct{}{}:
+		return func() { <-l.slot; done() }, nil
+	case <-ctx.Done():
+		done()
+		return nil, ctx.Err()
+	}
 }
 
 // lease counts a new holder of e. The caller holds mu.
