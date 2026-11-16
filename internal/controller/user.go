@@ -311,11 +311,6 @@ func (e *userExternal) observe(ctx context.Context, spec cachev1alpha1.CacheUser
 	return lifecycle.Observation[userState]{Exists: true, UpToDate: upToDate, Current: userState{info}}, nil
 }
 
-// Annotation of the binding Secret that the lifecycle sets when it has issued a
-// rotation and not yet recorded it in the status (lib-operator-go keeps the
-// name private; it is part of its documented rotation protocol).
-const annotationRotationSequence = "craftainer.dev/rotation-sequence"
-
 // drift is how the passwords on the server and the binding Secret disagree.
 type drift struct {
 	// unusable: the Secret holds a login for this user whose password is not
@@ -345,7 +340,7 @@ func (e *userExternal) loginOf(s *corev1.Secret) string {
 func (e *userExternal) rotating(s *corev1.Secret) bool {
 	rs := e.claim.GetRotationStatus()
 	return rs.Previous != "" || rs.RetireAfter != nil ||
-		s.Annotations[annotationRotationSequence] == strconv.FormatInt(rs.Sequence+1, 10)
+		s.Annotations[lifecycle.AnnotationRotationSequence] == strconv.FormatInt(rs.Sequence+1, 10)
 }
 
 // driftOf compares the passwords of the user with the binding Secret's. Only

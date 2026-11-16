@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.4
 
 require (
-	github.com/craftainer-labs/lib-operator-go v0.3.0
+	github.com/craftainer-labs/lib-operator-go v0.4.0
 	github.com/onsi/ginkgo/v2 v2.34.0
 	github.com/onsi/gomega v1.44.0
 	github.com/valkey-io/valkey-go v1.0.79
