@@ -86,7 +86,7 @@ proxy credential; `TestUserUpdateWithoutAValidSecretRotates` and `TestUserUpdate
 check that a change never resets the password; `TestUserRotateBegin` and
 `TestUserRotateFinish` check that a retried rotation drops only the failed
 attempt's password and that a retire with an unknown hash changes nothing;
-`TestUserPasswordDrift` (`internal/controller`, with the in-memory server, and
+`TestUserExternalPasswordDrift` and `TestUserPasswordDrift` (`internal/controller`, with the in-memory server, and
 `TestControllerPasswordDrift` against a real Valkey) check that an extra password
 is removed, a grace-period password is kept and a changed password leads to a
 rotation, with no hash or password in an Event;

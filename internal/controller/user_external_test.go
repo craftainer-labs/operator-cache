@@ -661,6 +661,22 @@ func TestUserExternalPasswordDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// An unusable Secret during a rotation's grace period leaves the grace
+	// passwords: the Secret is dropped and the next rotation keeps them.
+	e.claim.SetRotationStatus(common.RotationStatus{Previous: "1"})
+	holding(e, secretOf("changed-out-of-band", true, nil))
+	st, _ = observed(t, e)
+	e.drop = func(context.Context, *corev1.Secret) error { return nil }
+	v.reset()
+	if _, err := e.Update(ctx, extSpec, st); !errors.Is(err, ErrBindingNotUsable) {
+		t.Fatalf("update in a rotation: %v", err)
+	}
+	v.wantNot(t, "resetpass")
+	if len(v.user(extName).hashes) != 1 {
+		t.Errorf("hashes after an unusable Secret in a rotation: %d", len(v.user(extName).hashes))
+	}
+	e.claim.SetRotationStatus(common.RotationStatus{})
+
 	// A Secret whose password is not on the server is unusable: the passwords on
 	// the server are removed, the Secret is dropped and the next reconcile rotates.
 	rec.Reset()

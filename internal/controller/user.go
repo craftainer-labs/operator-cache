@@ -454,7 +454,8 @@ func (e *userExternal) withdraw(ctx context.Context, v Valkey, cause error) {
 // and returns ErrBindingNotUsable, after deleting a Secret of this claim that
 // holds something else: the next reconcile finds the Secret missing and the
 // lifecycle rotates. When the Secret's password is not on the server, the
-// passwords there are not known to the operator and are removed. When the
+// passwords there are not known to the operator and are removed, unless a rotation is in
+// flight: its grace passwords stay, and the retire keeps only the new Secret's. When the
 // server holds passwords beside the Secret's and no rotation is in flight, they
 // are removed too, in the same command as the rules. State is what Observe read.
 func (e *userExternal) Update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, st userState) (binding.Data, error) {
@@ -495,13 +496,13 @@ func (e *userExternal) update(ctx context.Context, spec cachev1alpha1.CacheUserS
 	if login != "" && !d.unusable {
 		return e.data(login), nil
 	}
+	if d.unusable {
+		e.report(ctx, "binding-password-absent", "the binding Secret's password is not one of the user's; the Secret is replaced by a rotation")
+	}
 	if s != nil && metav1.IsControlledBy(s, e.claim) {
 		if err := e.drop(ctx, s); err != nil {
 			return nil, err
 		}
-	}
-	if d.unusable {
-		e.report(ctx, "binding-password-absent", "the binding Secret's password is not one of the user's; the Secret is replaced by a rotation")
 	}
 	return nil, ErrBindingNotUsable
 }
