@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -64,6 +65,7 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if u.DeletionTimestamp.IsZero() {
 			x.pre = be.notReady
 		}
+		x.rec = r.Recorder
 		x.persist = func(ctx context.Context) error { return r.Client.Status().Update(ctx, &u) }
 		x.binding = func(ctx context.Context) (*corev1.Secret, error) { return r.bindingSecret(ctx, &u) }
 		x.drop = func(ctx context.Context, s *corev1.Secret) error {
@@ -217,6 +219,8 @@ type userExternal struct {
 	binding func(context.Context) (*corev1.Secret, error)
 	// drop deletes a binding Secret.
 	drop func(context.Context, *corev1.Secret) error
+	// rec records the Events of a drift; nil records none.
+	rec events.EventRecorder
 }
 
 func newUserExternal(be *backend, claim *cachev1alpha1.CacheUser) *userExternal {
@@ -295,7 +299,76 @@ func (e *userExternal) observe(ctx context.Context, spec cachev1alpha1.CacheUser
 	// A rule the controller refuses gives no wanted set, so the user is never up
 	// to date and Update reports it; deleting does not need a valid spec.
 	t, err := e.tenant(spec)
-	return lifecycle.Observation[userState]{Exists: true, UpToDate: err == nil && t.Matches(info), Current: userState{info}}, nil
+	upToDate := err == nil && t.Matches(info)
+	if upToDate {
+		// The rules are right; the passwords may not be (see drift).
+		s, err := e.binding(ctx)
+		if err != nil {
+			return none, err
+		}
+		upToDate = !e.driftOf(info, s).any()
+	}
+	return lifecycle.Observation[userState]{Exists: true, UpToDate: upToDate, Current: userState{info}}, nil
+}
+
+// Annotation of the binding Secret that the lifecycle sets when it has issued a
+// rotation and not yet recorded it in the status (lib-operator-go keeps the
+// name private; it is part of its documented rotation protocol).
+const annotationRotationSequence = "craftainer.dev/rotation-sequence"
+
+// drift is how the passwords on the server and the binding Secret disagree.
+type drift struct {
+	// unusable: the Secret holds a login for this user whose password is not
+	// one of the user's, so no consumer can log in with the Secret.
+	unusable bool
+	// extra: the user holds passwords beside the Secret's that no rotation in
+	// flight explains.
+	extra bool
+}
+
+func (d drift) any() bool { return d.unusable || d.extra }
+
+// loginOf is the password the Secret holds for this user, or "" when the
+// Secret is missing, is of another user or holds no password (the cases the
+// binding paths already repair, which are not drift).
+func (e *userExternal) loginOf(s *corev1.Secret) string {
+	if s == nil || string(s.Data["username"]) != e.name {
+		return ""
+	}
+	return string(s.Data["password"])
+}
+
+// rotating reports whether a rotation is in flight, so that the user may hold
+// the passwords of more than one generation: a grace period is recorded, or the
+// lifecycle has issued the next rotation (it marks the Secret) and not yet
+// recorded it.
+func (e *userExternal) rotating(s *corev1.Secret) bool {
+	rs := e.claim.GetRotationStatus()
+	return rs.Previous != "" || rs.RetireAfter != nil ||
+		s.Annotations[annotationRotationSequence] == strconv.FormatInt(rs.Sequence+1, 10)
+}
+
+// driftOf compares the passwords of the user with the binding Secret's. Only
+// hashes are compared and nothing of them is reported.
+func (e *userExternal) driftOf(info valkeyacl.UserInfo, s *corev1.Secret) drift {
+	login := e.loginOf(s)
+	if login == "" {
+		return drift{}
+	}
+	hash := valkeyacl.HashPassword(login)
+	if !slices.Contains(info.PasswordHashes, hash) {
+		return drift{unusable: true}
+	}
+	return drift{extra: len(info.PasswordHashes) > 1 && !e.rotating(s)}
+}
+
+// report records a drift: a category in the log and an Event, never a hash or a
+// password.
+func (e *userExternal) report(ctx context.Context, category, note string) {
+	log.FromContext(ctx).Info("the passwords of the user drifted from the binding Secret", "category", category)
+	if e.rec != nil {
+		e.rec.Eventf(e.claim, nil, corev1.EventTypeWarning, "PasswordDrift", "Update", "%s", note)
+	}
 }
 
 // newPassword is a password for the user: 52 characters of 5 bits each.
@@ -375,17 +448,22 @@ func (e *userExternal) withdraw(ctx context.Context, v Valkey, cause error) {
 // "reset", so the password survives and the credentials in use stay valid. The
 // binding Secret is returned as it is, with the fields that follow the spec.
 //
-// A password is never reset in place. When the binding Secret does not hold the
-// user (it is missing, or holds another user or no password), Update has applied
-// the rules and returns ErrBindingNotUsable, after deleting a Secret of this
-// claim that holds something else: the next reconcile finds the Secret missing
-// and the lifecycle rotates.
-func (e *userExternal) Update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, _ userState) (binding.Data, error) {
-	data, err := e.update(ctx, spec)
+// A password is never reset to one the Secret holds. When the binding Secret does
+// not hold the user (it is missing, or holds another user or no password), or
+// holds a password that is not one of the user's, Update has applied the rules
+// and returns ErrBindingNotUsable, after deleting a Secret of this claim that
+// holds something else: the next reconcile finds the Secret missing and the
+// lifecycle rotates. When the Secret's password is not on the server, the
+// passwords there are not known to the operator and are removed, unless a rotation is in
+// flight: its grace passwords stay, and the retire keeps only the new Secret's. When the
+// server holds passwords beside the Secret's and no rotation is in flight, they
+// are removed too, in the same command as the rules. State is what Observe read.
+func (e *userExternal) Update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, st userState) (binding.Data, error) {
+	data, err := e.update(ctx, spec, st)
 	return data, coarse(ctx, "update", err)
 }
 
-func (e *userExternal) update(ctx context.Context, spec cachev1alpha1.CacheUserSpec) (binding.Data, error) {
+func (e *userExternal) update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, st userState) (binding.Data, error) {
 	rules, err := e.rules(spec)
 	if err != nil {
 		return nil, err
@@ -394,16 +472,32 @@ func (e *userExternal) update(ctx context.Context, spec cachev1alpha1.CacheUserS
 	if err != nil {
 		return nil, err
 	}
-	if err := v.SetUser(ctx, e.name, rules...); err != nil {
-		return nil, err
-	}
-	e.claim.SetExternalID(e.name)
 	s, err := e.binding(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if s != nil && string(s.Data["username"]) == e.name && len(s.Data["password"]) > 0 {
-		return e.data(string(s.Data["password"])), nil
+	login := e.loginOf(s)
+	d := e.driftOf(st.info, s)
+	switch {
+	case d.unusable && !e.rotating(s):
+		// No consumer can log in with the Secret, so the passwords on the
+		// server are nobody's to keep; the rotation that follows adds one.
+		rules = append(rules, "resetpass")
+	case d.extra:
+		rules = append(rules, valkeyacl.KeepOnly(valkeyacl.HashPassword(login))...)
+	}
+	if err := v.SetUser(ctx, e.name, rules...); err != nil {
+		return nil, err
+	}
+	e.claim.SetExternalID(e.name)
+	if d.extra {
+		e.report(ctx, "unknown-passwords", "the user held passwords the operator did not issue; they were removed")
+	}
+	if login != "" && !d.unusable {
+		return e.data(login), nil
+	}
+	if d.unusable {
+		e.report(ctx, "binding-password-absent", "the binding Secret's password is not one of the user's; the Secret is replaced by a rotation")
 	}
 	if s != nil && metav1.IsControlledBy(s, e.claim) {
 		if err := e.drop(ctx, s); err != nil {

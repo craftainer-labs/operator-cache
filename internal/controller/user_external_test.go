@@ -12,7 +12,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
+	"github.com/craftainer-labs/lib-operator-go/pkg/testenv"
 
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
@@ -278,7 +280,11 @@ func TestUserCreate(t *testing.T) {
 func TestUserUpdate(t *testing.T) {
 	ctx := context.Background()
 	e, v, pw := created(t)
-	cur := userState{}
+	obs, err := e.Observe(ctx, extSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := obs.Current
 
 	// With the Secret holding the user, the rules are reapplied without "reset"
 	// and the same password is returned.
@@ -333,10 +339,12 @@ func TestUserUpdate(t *testing.T) {
 	if _, err := e.Update(ctx, cachev1alpha1.CacheUserSpec{Profile: "Admin"}, cur); !errors.Is(err, ErrInvalidSpec) {
 		t.Errorf("invalid spec: %v", err)
 	}
+	bindingWith(e, extName, pw)
 	v.fail["SetUser"] = errServer
 	if _, err := e.Update(ctx, extSpec, cur); !errors.Is(err, errServer) {
 		t.Errorf("SetUser: %v", err)
 	}
+	v.fail = map[string]error{}
 	e.be.server = func(context.Context) (Valkey, error) { return nil, errServer }
 	if _, err := e.Update(ctx, extSpec, cur); !errors.Is(err, errServer) {
 		t.Errorf("connect: %v", err)
@@ -540,5 +548,189 @@ func TestUserDataCarriesTheServersFields(t *testing.T) {
 	}
 	if strings.Contains(string(data["uri"]), "pw") {
 		t.Error("the URI carries the password")
+	}
+}
+
+// secretOf is a binding Secret of the user with the password; annotations are
+// the lifecycle's marks, and the Secret is the claim's when owned is set.
+func secretOf(password string, owned bool, annotations map[string]string) *corev1.Secret {
+	s := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
+		Data:       map[string][]byte{"username": []byte(extName), "password": []byte(password)},
+	}
+	if owned {
+		s.OwnerReferences = []metav1.OwnerReference{ownedBy("uid-1")}
+	}
+	return s
+}
+
+func holding(e *userExternal, s *corev1.Secret) {
+	e.binding = func(context.Context) (*corev1.Secret, error) { return s, nil }
+}
+
+// observed is the state Observe reads now, and whether the user is up to date.
+func observed(t *testing.T, e *userExternal) (userState, bool) {
+	t.Helper()
+	obs, err := e.Observe(context.Background(), extSpec)
+	if err != nil || !obs.Exists {
+		t.Fatalf("observe: %+v, %v", obs, err)
+	}
+	return obs.Current, obs.UpToDate
+}
+
+// Passwords on the server that the binding Secret does not account for are drift:
+// a Secret whose password is not on the server is unusable and the user's
+// passwords are removed (the next reconcile rotates), and passwords beside the
+// Secret's are removed unless a rotation is in flight.
+func TestUserExternalPasswordDrift(t *testing.T) {
+	ctx := context.Background()
+	e, v, pw := created(t)
+	rec := &testenv.Recorder{}
+	e.rec = rec
+	holding(e, secretOf(pw, true, nil))
+	rogue := valkeyacl.HashPassword("rogue-password")
+	keep := "resetpass #" + valkeyacl.HashPassword(pw)
+
+	// Steady state: up to date, nothing to report.
+	if _, ok := observed(t, e); !ok {
+		t.Fatal("a user with the Secret's password only is not up to date")
+	}
+
+	// An extra password out of band is not up to date and is removed by Update,
+	// in the same command as the rules, which keeps the Secret's.
+	v.user(extName).addHash(rogue)
+	st, ok := observed(t, e)
+	if ok {
+		t.Fatal("an extra password is up to date")
+	}
+	v.reset()
+	data, err := e.Update(ctx, extSpec, st)
+	if err != nil || string(data["password"]) != pw {
+		t.Fatalf("update: %v, %v", err, data)
+	}
+	v.want(t, keep)
+	if got := v.user(extName); len(got.hashes) != 1 || !got.hasPassword(pw) {
+		t.Errorf("hashes after the update: %d", len(got.hashes))
+	}
+	rec.AssertEvent(t, corev1.EventTypeWarning, "PasswordDrift", "removed")
+	rec.AssertNoSecret(t, pw, "rogue-password", rogue, valkeyacl.HashPassword(pw))
+	if _, ok := observed(t, e); !ok {
+		t.Error("not up to date after the repair")
+	}
+
+	// Without a recorder the repair still happens.
+	e.rec = nil
+	v.user(extName).addHash(rogue)
+	st, _ = observed(t, e)
+	if _, err := e.Update(ctx, extSpec, st); err != nil || len(v.user(extName).hashes) != 1 {
+		t.Errorf("no recorder: %v, %d", err, len(v.user(extName).hashes))
+	}
+	e.rec = rec
+
+	// A rotation in flight keeps its grace passwords: a recorded grace period,
+	// or a Secret the lifecycle has marked and not yet recorded.
+	v.user(extName).addHash(rogue)
+	for name, set := range map[string]func(){
+		"previous": func() { e.claim.SetRotationStatus(common.RotationStatus{Previous: "1"}) },
+		"retire": func() {
+			at := metav1.Now()
+			e.claim.SetRotationStatus(common.RotationStatus{RetireAfter: &at})
+		},
+		"marked": func() {
+			e.claim.SetRotationStatus(common.RotationStatus{Sequence: 3})
+			holding(e, secretOf(pw, true, map[string]string{annotationRotationSequence: "4"}))
+		},
+	} {
+		set()
+		if _, ok := observed(t, e); !ok {
+			t.Errorf("%s: a grace password is drift", name)
+		}
+		e.claim.SetRotationStatus(common.RotationStatus{})
+		holding(e, secretOf(pw, true, nil))
+	}
+	// A mark of another sequence is not a rotation in flight.
+	e.claim.SetRotationStatus(common.RotationStatus{Sequence: 3})
+	holding(e, secretOf(pw, true, map[string]string{annotationRotationSequence: "3"}))
+	if _, ok := observed(t, e); ok {
+		t.Error("a past mark keeps an extra password")
+	}
+	e.claim.SetRotationStatus(common.RotationStatus{})
+	holding(e, secretOf(pw, true, nil))
+	st, _ = observed(t, e)
+	if _, err := e.Update(ctx, extSpec, st); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unusable Secret during a rotation's grace period leaves the grace
+	// passwords: the Secret is dropped and the next rotation keeps them.
+	e.claim.SetRotationStatus(common.RotationStatus{Previous: "1"})
+	holding(e, secretOf("changed-out-of-band", true, nil))
+	graceHash := valkeyacl.HashPassword("grace-password")
+	v.user(extName).addHash(graceHash)
+	st, _ = observed(t, e)
+	e.drop = func(context.Context, *corev1.Secret) error { return nil }
+	v.reset()
+	if _, err := e.Update(ctx, extSpec, st); !errors.Is(err, ErrBindingNotUsable) {
+		t.Fatalf("update in a rotation: %v", err)
+	}
+	v.wantNot(t, "resetpass")
+	if len(v.user(extName).hashes) != 2 {
+		t.Errorf("hashes after an unusable Secret in a rotation: %d", len(v.user(extName).hashes))
+	}
+	e.claim.SetRotationStatus(common.RotationStatus{})
+	v.user(extName).hashes = []string{valkeyacl.HashPassword(pw)}
+
+	// A Secret whose password is not on the server is unusable: the passwords on
+	// the server are removed, the Secret is dropped and the next reconcile rotates.
+	rec.Reset()
+	holding(e, secretOf("changed-out-of-band", true, nil))
+	st, ok = observed(t, e)
+	if ok {
+		t.Fatal("an unusable Secret is up to date")
+	}
+	dropped := false
+	e.drop = func(context.Context, *corev1.Secret) error { dropped = true; return nil }
+	v.reset()
+	if _, err := e.Update(ctx, extSpec, st); !errors.Is(err, ErrBindingNotUsable) {
+		t.Fatalf("update: %v", err)
+	}
+	v.want(t, "resetpass")
+	v.wantNot(t, " >", "#")
+	if !dropped || len(v.user(extName).hashes) != 0 {
+		t.Errorf("dropped = %v, hashes = %d", dropped, len(v.user(extName).hashes))
+	}
+	rec.AssertEvent(t, corev1.EventTypeWarning, "PasswordDrift", "not one of the user's")
+	rec.AssertNoSecret(t, "changed-out-of-band", pw, valkeyacl.HashPassword("changed-out-of-band"))
+
+	// With the Secret gone, the rotation gives the user a password of its own.
+	holding(e, nil)
+	next, _, err := e.RotateBegin(ctx, extSpec, st, lifecycle.RotationState{})
+	if err != nil || len(v.user(extName).hashes) != 1 {
+		t.Fatalf("rotate: %v, %d", err, len(v.user(extName).hashes))
+	}
+	holding(e, secretOf(string(next["password"]), true, nil))
+	if _, ok := observed(t, e); !ok {
+		t.Error("not up to date after the rotation")
+	}
+
+	// A Secret of another user or with no password is not drift: the binding
+	// paths handle it.
+	for _, s := range []*corev1.Secret{nil, {Data: map[string][]byte{"username": []byte("x"), "password": []byte("p")}}, {Data: map[string][]byte{"username": []byte(extName)}}} {
+		holding(e, s)
+		v.user(extName).addHash(rogue)
+		if _, ok := observed(t, e); !ok {
+			t.Errorf("secret %v is drift", s)
+		}
+	}
+
+	// A failing read of the Secret fails the observation.
+	e.binding = func(context.Context) (*corev1.Secret, error) { return nil, errServer }
+	if _, err := e.Observe(ctx, extSpec); !errors.Is(err, errServer) {
+		t.Errorf("binding: %v", err)
+	}
+	// With other rules the Secret is not read: Update repairs both.
+	v.user(extName).keys = "~*"
+	if obs, err := e.Observe(ctx, extSpec); err != nil || obs.UpToDate {
+		t.Errorf("widened keys: %+v, %v", obs, err)
 	}
 }

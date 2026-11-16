@@ -5,7 +5,11 @@ package integration
 import (
 	"errors"
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
@@ -191,6 +195,92 @@ func TestControllerRotation(t *testing.T) {
 	allowed(t, newClient, "GET", ns+":k")
 	if u, err = a.GetUser(bg, name); err != nil || len(u.PasswordHashes) != 1 || u.PasswordHashes[0] != valkeyacl.HashPassword(newPW) {
 		t.Fatalf("after RotateFinish: %+v, %v", u, err)
+	}
+}
+
+// Passwords on the server that the binding Secret does not account for are drift
+// (the lifecycle runs Observe, then Update when it is not up to date): a password
+// added out of band is removed, a rotation's grace password is kept, and a
+// password changed out of band makes the Secret unusable, so the next reconcile
+// rotates.
+func TestControllerPasswordDrift(t *testing.T) {
+	i, a, s, _ := newClaim(t)
+	name := i.Claim().GetExternalName()
+	data, err := i.Create(bg, readWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i.Binding = data
+	pw := string(data["password"])
+	const roguePW = "rogue-password-0123456789"
+
+	// A password added out of band is not up to date and is removed by Update;
+	// the Secret's password goes on logging in.
+	if err := a.SetUser(bg, name, valkeyacl.AddPassword(roguePW)); err != nil {
+		t.Fatal(err)
+	}
+	loginOK(t, s, name, roguePW)
+	obs, err := i.Observe(bg, readWrite)
+	if err != nil || !obs.Exists || obs.UpToDate {
+		t.Fatalf("Observe with an extra password: %+v, %v", obs, err)
+	}
+	if _, err := i.Update(bg, readWrite, obs.Current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.login(name, roguePW); err == nil {
+		t.Fatal("the extra password still logs in")
+	}
+	loginOK(t, s, name, pw)
+	if obs, err = i.Observe(bg, readWrite); err != nil || !obs.UpToDate {
+		t.Fatalf("Observe after the repair: %+v, %v", obs, err)
+	}
+
+	// A rotation in flight keeps its grace password: RotateBegin, then the
+	// lifecycle records the grace period; Observe finds nothing to repair.
+	next, _, err := i.RotateBegin(bg, readWrite, obs.Current, lifecycle.RotationState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i.Binding = next
+	i.Claim().SetRotationStatus(common.RotationStatus{Active: "1", Sequence: 1, RetireAfter: &metav1.Time{Time: time.Now().Add(time.Hour)}})
+	if obs, err = i.Observe(bg, readWrite); err != nil || !obs.UpToDate {
+		t.Fatalf("Observe in the grace period: %+v, %v", obs, err)
+	}
+	loginOK(t, s, name, pw)
+	loginOK(t, s, name, string(next["password"]))
+	if err := i.RotateFinish(bg, readWrite, obs.Current, lifecycle.RotationState{Active: "1", Sequence: 1}); err != nil {
+		t.Fatal(err)
+	}
+	i.Claim().SetRotationStatus(common.RotationStatus{Active: "1", Sequence: 1})
+	pw = string(next["password"])
+
+	// The Secret's password is changed out of band: the Secret is unusable, Update
+	// removes the passwords on the server and drops the Secret, and the rotation
+	// that follows gives the user a password that is the only one.
+	if err := a.SetUser(bg, name, "resetpass", valkeyacl.AddPassword(roguePW)); err != nil {
+		t.Fatal(err)
+	}
+	if obs, err = i.Observe(bg, readWrite); err != nil || obs.UpToDate {
+		t.Fatalf("Observe of a changed password: %+v, %v", obs, err)
+	}
+	if _, err := i.Update(bg, readWrite, obs.Current); !errors.Is(err, controller.ErrBindingNotUsable) {
+		t.Fatalf("Update: %v", err)
+	}
+	i.Binding = nil // the lifecycle deletes a Secret of the claim; this one has no owner
+	if _, err := s.login(name, roguePW); err == nil {
+		t.Fatal("the password set out of band still logs in")
+	}
+	if _, err := s.login(name, pw); err == nil {
+		t.Fatal("the old password logs in")
+	}
+	rotated, _, err := i.RotateBegin(bg, readWrite, obs.Current, lifecycle.RotationState{Active: "1", Sequence: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i.Binding = rotated
+	loginOK(t, s, name, string(rotated["password"]))
+	if obs, err = i.Observe(bg, readWrite); err != nil || !obs.UpToDate {
+		t.Fatalf("Observe after the rotation: %+v, %v", obs, err)
 	}
 }
 

@@ -376,6 +376,63 @@ func TestUserUpdateWithoutAValidSecretRotates(t *testing.T) {
 	}
 }
 
+// A password change out of band is drift: the Secret becomes unusable and the
+// next reconcile rotates, and a password added out of band is removed, unless
+// the user is in a rotation's grace period.
+func TestUserPasswordDrift(t *testing.T) {
+	h := newHarness(t, nil)
+	r := &UserReconciler{h.cfg}
+	grace := metav1.Duration{Duration: time.Hour}
+	u := h.user("app", func(u *cachev1alpha1.CacheUser) {
+		u.Spec.RotationPolicy = &common.RotationPolicy{GracePeriod: &grace}
+	})
+	user := userName(h.ns, "app")
+	h.reconcileOK(r, u)
+	h.get(u)
+	first := h.bindingSecret(u)["password"]
+
+	// An extra password out of band is removed, and the Secret's stays.
+	h.fake.user(user).addHash(valkeyacl.HashPassword("rogue"))
+	h.fake.reset()
+	h.reconcileOK(r, u)
+	h.fake.want(t, "resetpass #"+valkeyacl.HashPassword(first))
+	if got := h.fake.user(user); len(got.hashes) != 1 || !got.hasPassword(first) {
+		t.Errorf("hashes after the repair: %d", len(got.hashes))
+	}
+	h.rec.AssertEvent(t, corev1.EventTypeWarning, "PasswordDrift", "removed")
+	h.rec.AssertNoSecret(t, first, "rogue")
+
+	// The password changed out of band: the Secret is unusable, it is deleted, and
+	// the next reconcile rotates.
+	h.fake.user(user).hashes = []string{valkeyacl.HashPassword("changed")}
+	if err := h.reconcile(r, u); !errors.Is(err, ErrBindingNotUsable) {
+		t.Fatalf("reconcile: %v", err)
+	}
+	h.rec.AssertEvent(t, corev1.EventTypeWarning, "PasswordDrift", "not one of the user's")
+	if got := h.fake.user(user); len(got.hashes) != 0 {
+		t.Errorf("hashes after the drift: %d", len(got.hashes))
+	}
+	h.reconcileOK(r, u)
+	second := h.bindingSecret(u)["password"]
+	if second == first || !h.fake.user(user).hasPassword(second) || len(h.fake.user(user).hashes) != 1 {
+		t.Errorf("binding after the rotation: %q, %d hashes", second, len(h.fake.user(user).hashes))
+	}
+
+	// During the grace period of that rotation the user holds a second password;
+	// it is left alone until the retire.
+	h.get(u)
+	if u.Status.Rotation == nil || u.Status.Rotation.RetireAfter == nil {
+		t.Fatalf("rotation = %+v", u.Status.Rotation)
+	}
+	h.fake.user(user).addHash(valkeyacl.HashPassword("grace"))
+	h.fake.reset()
+	h.reconcileOK(r, u)
+	h.fake.wantNot(t, writes...)
+	if len(h.fake.user(user).hashes) != 2 {
+		t.Errorf("hashes in the grace period: %d", len(h.fake.user(user).hashes))
+	}
+}
+
 // A claim whose server reports Ready=False waits and never connects, unless it
 // is being deleted; a server with no Ready condition at all is used.
 func TestUserWaitsForAReadyServer(t *testing.T) {
