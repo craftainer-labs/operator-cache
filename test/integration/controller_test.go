@@ -411,6 +411,7 @@ func TestControllerFinishesACreateThatCrashed(t *testing.T) {
 		t.Errorf("externalId = %q", i.Claim().GetExternalID())
 	}
 	i.Binding = data
+	loginOK(t, s, name, string(data["password"]))
 	// No Secret was ever written, so nobody holds the crashed attempt's password:
 	// RotateBegin leaves the user with the new one alone.
 	if _, err := s.login(name, crashedPW); err == nil {

@@ -534,9 +534,9 @@ func (e *userExternal) currentPassword(ctx context.Context) (string, error) {
 	return string(s.Data["password"]), nil
 }
 
-// RotateBegin implements lifecycle.Rotator: the user keeps every password it has
-// beside a new one, so every credential a consumer may still hold works through
-// the grace period. What is "previous" comes from the server, not from the
+// RotateBegin implements lifecycle.Rotator: with a usable binding Secret the user
+// keeps every password it has beside a new one, so every credential a consumer
+// may still hold works through the grace period. What is "previous" comes from the server, not from the
 // binding Secret: the lifecycle writes the Secret before it marks it and before
 // it records the rotation, so a retry after a crash between those steps finds
 // the Secret holding the new password of the first attempt. Keeping only the
@@ -566,7 +566,7 @@ func (e *userExternal) begin(ctx context.Context) (binding.Data, error) {
 	password := newPassword()
 	// No usable Secret: nothing to keep, so only "resetpass" precedes the new
 	// password.
-	rules := []string{"resetpass"}
+	rules := valkeyacl.KeepOnly()
 	if current != "" {
 		info, err := v.GetUser(ctx, e.name)
 		if err != nil && !errors.Is(err, valkeyacl.ErrNotFound) {
