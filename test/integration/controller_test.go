@@ -284,6 +284,43 @@ func TestControllerPasswordDrift(t *testing.T) {
 	}
 }
 
+// A rotation with no usable Secret leaves the user with exactly the new
+// password: a hash added out of band does not survive it.
+func TestControllerRotateBeginWithoutSecretDropsUnknownHashes(t *testing.T) {
+	i, a, s, _ := newClaim(t)
+	name := i.Claim().GetExternalName()
+	data, err := i.Create(bg, readWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i.Binding = data
+	oldPW := string(data["password"])
+	const roguePW = "rogue-password-0123456789"
+	if err := a.SetUser(bg, name, valkeyacl.AddPassword(roguePW)); err != nil {
+		t.Fatal(err)
+	}
+	i.Binding = nil // the Secret is deleted
+	obs, err := i.Observe(bg, readWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, _, err := i.RotateBegin(bg, readWrite, obs.Current, lifecycle.RotationState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPW := string(rotated["password"])
+	u, err := a.GetUser(bg, name)
+	if err != nil || len(u.PasswordHashes) != 1 || u.PasswordHashes[0] != valkeyacl.HashPassword(newPW) {
+		t.Fatalf("after RotateBegin: %+v, %v", u, err)
+	}
+	loginOK(t, s, name, newPW)
+	for _, old := range []string{roguePW, oldPW} {
+		if _, err := s.login(name, old); err == nil {
+			t.Fatal("a password the new Secret does not hold still logs in")
+		}
+	}
+}
+
 // A retire whose Secret holds a password the server does not list changes
 // nothing: "resetpass" would otherwise leave the user with no password.
 func TestControllerRotateFinishRefusesAnUnknownPassword(t *testing.T) {

@@ -543,8 +543,9 @@ func (e *userExternal) currentPassword(ctx context.Context) (string, error) {
 // Secret's password would drop the one the consumers still use. The passwords
 // of a failed attempt that nobody was given stay until RotateFinish, which keeps
 // only the password of the Secret. With no usable binding Secret (missing, or of
-// another user) there is no credential to protect: the user gets the new password
-// alone.
+// another user) no consumer holds a valid credential, so no grace password is
+// worth keeping: "resetpass" plus the new password leaves the user with exactly
+// the new one, and a hash the operator does not know is removed.
 func (e *userExternal) RotateBegin(ctx context.Context, _ cachev1alpha1.CacheUserSpec, _ userState, st lifecycle.RotationState) (binding.Data, lifecycle.Generation, error) {
 	data, err := e.begin(ctx)
 	if err != nil {
@@ -563,7 +564,9 @@ func (e *userExternal) begin(ctx context.Context) (binding.Data, error) {
 		return nil, err
 	}
 	password := newPassword()
-	var rules []string
+	// No usable Secret: nothing to keep, so only "resetpass" precedes the new
+	// password.
+	rules := []string{"resetpass"}
 	if current != "" {
 		info, err := v.GetUser(ctx, e.name)
 		if err != nil && !errors.Is(err, valkeyacl.ErrNotFound) {
