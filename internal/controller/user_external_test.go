@@ -582,7 +582,7 @@ func observed(t *testing.T, e *userExternal) (userState, bool) {
 // a Secret whose password is not on the server is unusable and the user's
 // passwords are removed (the next reconcile rotates), and passwords beside the
 // Secret's are removed unless a rotation is in flight.
-func TestUserPasswordDrift(t *testing.T) {
+func TestUserExternalPasswordDrift(t *testing.T) {
 	ctx := context.Background()
 	e, v, pw := created(t)
 	rec := &testenv.Recorder{}

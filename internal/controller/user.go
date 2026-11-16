@@ -478,7 +478,7 @@ func (e *userExternal) update(ctx context.Context, spec cachev1alpha1.CacheUserS
 	login := e.loginOf(s)
 	d := e.driftOf(st.info, s)
 	switch {
-	case d.unusable:
+	case d.unusable && !e.rotating(s):
 		// No consumer can log in with the Secret, so the passwords on the
 		// server are nobody's to keep; the rotation that follows adds one.
 		rules = append(rules, "resetpass")
@@ -495,13 +495,13 @@ func (e *userExternal) update(ctx context.Context, spec cachev1alpha1.CacheUserS
 	if login != "" && !d.unusable {
 		return e.data(login), nil
 	}
-	if d.unusable {
-		e.report(ctx, "binding-password-absent", "the binding Secret's password is not one of the user's; the Secret is replaced by a rotation")
-	}
 	if s != nil && metav1.IsControlledBy(s, e.claim) {
 		if err := e.drop(ctx, s); err != nil {
 			return nil, err
 		}
+	}
+	if d.unusable {
+		e.report(ctx, "binding-password-absent", "the binding Secret's password is not one of the user's; the Secret is replaced by a rotation")
 	}
 	return nil, ErrBindingNotUsable
 }
