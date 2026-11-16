@@ -90,8 +90,8 @@ func TestGuardRefuses(t *testing.T) {
 
 func TestGuardedConn(t *testing.T) {
 	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
 	limits := 0
 	c := &guardedConn{Conn: client, onLimit: func() { limits++ }}
 	buf := make([]byte, 64)

@@ -155,7 +155,7 @@ func (c *guardedConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if gerr := c.guard.feed(p[:n]); gerr != nil {
 		c.onLimit()
-		_ = c.Conn.Close()
+		_ = c.Close()
 		return 0, gerr
 	}
 	return n, err
