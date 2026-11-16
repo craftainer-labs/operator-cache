@@ -73,6 +73,24 @@ operator applies the rules, reports `the binding Secret does not hold the user's
 login` and rotates on the next reconcile instead of resetting the password.
 Deleting the claim deletes the user, which ends its sessions.
 
+**Password drift.** The binding Secret is the only source of the user's
+password, so the operator compares the SHA-256 hash of the Secret's password with
+the hashes on the server at every reconcile (hashes only; neither is logged or
+shown). If the Secret's hash is not on the server, the binding is unusable: the
+operator removes the user's passwords, deletes the Secret it owns (the reconcile
+reports `the binding Secret does not hold the user's login`) and the next
+reconcile rotates, which gives the user a new password. The operator never adds
+the Secret's password back, because that would let whoever can write the Secret
+choose the user's password. If the server holds hashes beside the Secret's, they
+are removed (`resetpass #<hash>` in the same command as the rules), unless a
+rotation is in flight, whose grace-period hashes are kept: a recorded
+`status.rotation` grace period, or a Secret the lifecycle has marked with the
+next rotation and not yet recorded. Each repair is a Warning Event with reason
+`PasswordDrift` and a log line with a category only. A rotation that crashes
+between writing the Secret and marking it is not yet visible to this check, so
+a reconcile in that window may remove the previous password early; the claim is
+rotated again afterwards.
+
 **`status.externalId` is the only proof that the claim made its user.** An ACL
 user has no marker, so the claim records `create-issued` before the first
 `ACL SETUSER` and the user's name after it. A user of the derived name that

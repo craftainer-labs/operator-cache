@@ -48,6 +48,14 @@ Security (access control, audit, secrets, plan rows EB-2, EB-4 and EB-9).
   never left with no password. A change of the rules or the spec never changes the
   password: the rules are applied without `reset`, and a binding Secret that is
   missing or does not hold the user leads to a rotation, not a reset.
+- The user's passwords on the server are only those the binding Secret and a
+  rotation in flight account for. At each reconcile the operator compares hashes
+  (SHA-256, never shown): a Secret whose password is not on the server is
+  unusable, the user's passwords are removed and the Secret is replaced by a
+  rotation, and hashes beside the Secret's are removed unless a grace period (or
+  a rotation the lifecycle issued and has not recorded) holds them. A password is
+  never reinstated from the Secret. A repair is a Warning Event (`PasswordDrift`)
+  and a log line with a category only.
 - The webhooks admit an object that is being deleted, so finalizer removal is
   never blocked.
 - A cached server connection is closed when it is replaced, forgotten or idle for
@@ -78,6 +86,10 @@ proxy credential; `TestUserUpdateWithoutAValidSecretRotates` and `TestUserUpdate
 check that a change never resets the password; `TestUserRotateBegin` and
 `TestUserRotateFinish` check that a retried rotation drops only the failed
 attempt's password and that a retire with an unknown hash changes nothing;
+`TestUserPasswordDrift` (`internal/controller`, with the in-memory server, and
+`TestControllerPasswordDrift` against a real Valkey) check that an extra password
+is removed, a grace-period password is kept and a changed password leads to a
+rotation, with no hash or password in an Event;
 `TestServerCache*` (`internal/controller`) cover the lease-counted cache, its lock
 per server and its sweeper; `TestGuard*` and `TestVersionBoundsTheReply`
 (`internal/valkeyacl`) cover the reply limits. The e2e lane installs the chart as an arbitrary UID under Pod Security
