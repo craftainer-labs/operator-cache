@@ -69,7 +69,7 @@ func newTicker(d time.Duration) (<-chan time.Time, func()) {
 // does not answer holds up only the Gets for its own key, for the connect
 // timeout, and they find its connection once the first has built it. A Forget
 // during a build does not stop it: the connection it makes is cached and is
-// closed by the idle sweep.
+// closed by the idle sweep, or, once Start has shut down, by its release.
 func (c *ServerCache) Get(ctx context.Context, key, version string, build func(context.Context) (Valkey, error)) (Valkey, func(), error) {
 	if c == nil {
 		b, err := build(ctx)
