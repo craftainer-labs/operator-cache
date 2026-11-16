@@ -249,8 +249,8 @@ func TestUserCreateRacesWithAnotherCreator(t *testing.T) {
 
 // A user that was made but not recorded (the crash fell between the SETUSER and
 // the status write) is finished, not refused: the claim recorded its intent.
-// There is no binding Secret, so the lifecycle rotates, which keeps the password
-// nobody has and then retires it.
+// There is no binding Secret, so the lifecycle rotates, which resets the
+// password nobody has: the user ends with the new one alone.
 func TestUserFinishesACreateThatCrashed(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, nil)
@@ -270,10 +270,10 @@ func TestUserFinishesACreateThatCrashed(t *testing.T) {
 		t.Errorf("status.externalId = %q", u.Status.ExternalID)
 	}
 	// With no binding Secret there is no current password to keep.
-	h.fake.want(t, "SetUser "+name+" >")
-	h.fake.wantNot(t, "reset >", "resetpass")
+	h.fake.want(t, "SetUser "+name+" resetpass >")
+	h.fake.wantNot(t, "reset >")
 	secret := h.bindingSecret(u)["password"]
-	if got := h.fake.user(name); !got.hasPassword(secret) || !got.hasPassword("crashed-pw") {
+	if got := h.fake.user(name); !got.hasPassword(secret) || got.hasPassword("crashed-pw") || len(got.hashes) != 1 {
 		t.Errorf("passwords on the server: %d", len(got.hashes))
 	}
 
@@ -359,13 +359,13 @@ func TestUserUpdateWithoutAValidSecretRotates(t *testing.T) {
 
 			h.fake.reset()
 			h.reconcileOK(r, u)
-			h.fake.want(t, "SetUser "+user+" >")
+			h.fake.want(t, "SetUser "+user+" resetpass >")
 			got := h.bindingSecret(u)
 			if got["username"] != user || got["password"] == "" || got["password"] == password {
 				t.Errorf("binding after the rotation = %v", got)
 			}
-			// The old password stays valid through the grace period.
-			if !h.fake.user(user).hasPassword(password) || !h.fake.user(user).hasPassword(got["password"]) {
+			// No consumer holds a valid credential, so the new password is the only one.
+			if u := h.fake.user(user); u.hasPassword(password) || !u.hasPassword(got["password"]) || len(u.hashes) != 1 {
 				t.Error("the passwords on the server after the rotation")
 			}
 			h.get(u)

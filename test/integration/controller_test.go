@@ -284,6 +284,43 @@ func TestControllerPasswordDrift(t *testing.T) {
 	}
 }
 
+// A rotation with no usable Secret leaves the user with exactly the new
+// password: a hash added out of band does not survive it.
+func TestControllerRotateBeginWithoutSecretDropsUnknownHashes(t *testing.T) {
+	i, a, s, _ := newClaim(t)
+	name := i.Claim().GetExternalName()
+	data, err := i.Create(bg, readWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i.Binding = data
+	oldPW := string(data["password"])
+	const roguePW = "rogue-password-0123456789"
+	if err := a.SetUser(bg, name, valkeyacl.AddPassword(roguePW)); err != nil {
+		t.Fatal(err)
+	}
+	i.Binding = nil // the Secret is deleted
+	obs, err := i.Observe(bg, readWrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, _, err := i.RotateBegin(bg, readWrite, obs.Current, lifecycle.RotationState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPW := string(rotated["password"])
+	u, err := a.GetUser(bg, name)
+	if err != nil || len(u.PasswordHashes) != 1 || u.PasswordHashes[0] != valkeyacl.HashPassword(newPW) {
+		t.Fatalf("after RotateBegin: %+v, %v", u, err)
+	}
+	loginOK(t, s, name, newPW)
+	for _, old := range []string{roguePW, oldPW} {
+		if _, err := s.login(name, old); err == nil {
+			t.Fatal("a password the new Secret does not hold still logs in")
+		}
+	}
+}
+
 // A retire whose Secret holds a password the server does not list changes
 // nothing: "resetpass" would otherwise leave the user with no password.
 func TestControllerRotateFinishRefusesAnUnknownPassword(t *testing.T) {
@@ -347,7 +384,7 @@ func TestControllerNameCollision(t *testing.T) {
 
 // A create that crashed after the SETUSER, before the claim recorded the name, is
 // finished: the intent was recorded, so the user is the claim's, and with no
-// binding Secret the rotation adds a password that is then the only one.
+// binding Secret the rotation resets the passwords and gives a new one, the only one.
 func TestControllerFinishesACreateThatCrashed(t *testing.T) {
 	i, a, s, ns := newClaim(t)
 	name := i.Claim().GetExternalName()
@@ -374,7 +411,12 @@ func TestControllerFinishesACreateThatCrashed(t *testing.T) {
 		t.Errorf("externalId = %q", i.Claim().GetExternalID())
 	}
 	i.Binding = data
-	loginOK(t, s, name, crashedPW)
+	loginOK(t, s, name, string(data["password"]))
+	// No Secret was ever written, so nobody holds the crashed attempt's password:
+	// RotateBegin leaves the user with the new one alone.
+	if _, err := s.login(name, crashedPW); err == nil {
+		t.Fatal("the password of the crashed attempt still logs in after RotateBegin")
+	}
 	if err := i.RotateFinish(bg, readWrite, obs.Current, lifecycle.RotationState{Active: "1", Sequence: 1}); err != nil {
 		t.Fatal(err)
 	}

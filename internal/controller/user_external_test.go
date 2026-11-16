@@ -428,7 +428,8 @@ func TestUserRotateBegin(t *testing.T) {
 	}
 
 	// With no binding Secret (or one of another user) there is no current password:
-	// the new one is only added.
+	// nobody holds a valid credential, so the user is left with the new password
+	// alone, and a hash the server holds that the operator does not know is gone.
 	for _, tc := range []struct {
 		name string
 		bind func(*userExternal)
@@ -439,11 +440,10 @@ func TestUserRotateBegin(t *testing.T) {
 		e, v, pw := created(t)
 		tc.bind(e)
 		data, _, err := e.RotateBegin(ctx, extSpec, userState{}, st)
-		if u := v.user(extName); err != nil || len(u.hashes) != 2 || !u.hasPassword(pw) || !u.hasPassword(string(data["password"])) {
+		if u := v.user(extName); err != nil || len(u.hashes) != 1 || u.hasPassword(pw) || !u.hasPassword(string(data["password"])) {
 			t.Errorf("%s: %v", tc.name, err)
 		}
-		v.want(t, "SetUser "+extName+" >")
-		v.wantNot(t, "resetpass")
+		v.want(t, "SetUser "+extName+" resetpass >")
 	}
 
 	// Failures.
