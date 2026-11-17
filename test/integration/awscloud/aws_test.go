@@ -200,9 +200,12 @@ func isPending(err error) bool {
 func until[S, O any](t *testing.T, observe func(context.Context, S) (O, error), s S) O {
 	t.Helper()
 	ctx := timeout(t)
-	for range 20 {
+	for attempt := 1; ; attempt++ {
 		o, err := observe(ctx, s)
 		if isPending(err) {
+			if attempt >= 20 {
+				t.Fatal("the user did not settle")
+			}
 			continue
 		}
 		if err != nil {
@@ -210,9 +213,6 @@ func until[S, O any](t *testing.T, observe func(context.Context, S) (O, error), 
 		}
 		return o
 	}
-	t.Errorf("the user did not settle")
-	var zero O
-	return zero
 }
 
 // The probe reads the server from the service: the data-plane address, the

@@ -115,7 +115,7 @@ func (p Prober) probeAWS(ctx context.Context, s AWSServer, conn server.CloudConn
 
 // probeFailed logs the raw error of a failed AWS probe, which holds the
 // server's address, and returns its category only. The log line is the one
-// place the category of the failure is told apart.
+// place the raw cause of the failure is kept.
 func probeFailed(ctx context.Context, err error) error {
 	log.FromContext(ctx).Error(err, "the probe failed", "operation", "probe")
 	return categoryOnly(err)
