@@ -265,7 +265,7 @@ func newHarness(t *testing.T, mutate func(*cachev1alpha1.ClusterCacheServer)) *h
 	}
 	srv := &cachev1alpha1.ClusterCacheServer{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	srv.Spec.Host = "valkey.example.test"
-	srv.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: admin.Name, Namespace: h.ops}
+	srv.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: admin.Name, Namespace: h.ops}
 	srv.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
 	if mutate != nil {
 		mutate(srv)

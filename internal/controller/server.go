@@ -139,7 +139,7 @@ type serverObject struct {
 // Its errors are coarse: conditions show a fixed text, the log has the raw error.
 func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*backend, error) {
 	key := serverKey(ns, ref)
-	conn, err := server.Resolve(ctx, c.Client, ns, ref, server.WithOperatorNamespace(c.OperatorNamespace))
+	cconn, err := server.ResolveCloud(ctx, c.Client, ns, ref, server.WithOperatorNamespace(c.OperatorNamespace))
 	if err != nil {
 		// A server that is gone or no longer usable keeps no connection. A
 		// namespace the server does not serve says nothing about the server
@@ -150,6 +150,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		}
 		return nil, coarse(ctx, "resolve the server", err)
 	}
+	conn := cconn.Connection
 	obj, err := c.fetchServer(ctx, ns, ref)
 	if err != nil {
 		return nil, coarse(ctx, "read the server", err)

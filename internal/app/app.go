@@ -359,9 +359,9 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 		setupStep{"server connection sweeper", func(mgr ctrl.Manager) error { return mgr.Add(conns) }},
 		setupStep{"CacheUser controller", (&controller.UserReconciler{Config: cfg}).SetupWithManager},
 		setupStep{"ClusterCacheServer probe", serverProbe(mgr, cfg, cs.namespace,
-			func() probe.Server { return &cachev1alpha1.ClusterCacheServer{} })},
+			func() probe.CloudServer { return &cachev1alpha1.ClusterCacheServer{} })},
 		setupStep{"CacheServer probe", serverProbe(mgr, cfg, cs.namespace,
-			func() probe.Server { return &cachev1alpha1.CacheServer{} })},
+			func() probe.CloudServer { return &cachev1alpha1.CacheServer{} })},
 	)
 	// +kubebuilder:scaffold:builder
 	return runSteps(mgr, steps)
@@ -382,9 +382,9 @@ func cacheByObject() map[client.Object]cache.ByObject {
 // ServerReachable) from a login over a connection of its own. Its Client reads
 // Secrets and ConfigMaps live (managerOptions), and its watches on them go
 // through the manager's caches, which hold only the managed-by labelled ones.
-func serverProbe(mgr ctrl.Manager, cfg controller.Config, operatorNS string, kind func() probe.Server) func(ctrl.Manager) error {
+func serverProbe(mgr ctrl.Manager, cfg controller.Config, operatorNS string, kind func() probe.CloudServer) func(ctrl.Manager) error {
 	return (&probe.Reconciler{
-		Client: mgr.GetClient(), New: kind, Prober: controller.Prober{Config: cfg},
+		Client: mgr.GetClient(), NewCloud: kind, CloudProber: controller.Prober{Config: cfg},
 		Options: probe.Options{OperatorNamespace: operatorNS},
 	}).SetupWithManager
 }

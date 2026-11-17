@@ -16,8 +16,8 @@ func cacheServer(host, proxy string) *cachev1alpha1.CacheServer {
 	return &cachev1alpha1.CacheServer{
 		ObjectMeta: metav1.ObjectMeta{Name: "valkey", Namespace: "default"},
 		Spec: cachev1alpha1.CacheServerSpec{
-			ServerCommon: common.ServerCommon{ProxyURL: proxy},
-			ServerConfig: cachev1alpha1.ServerConfig{Host: host},
+			CloudServerCommon: common.CloudServerCommon{ProxyURL: proxy},
+			ServerConfig:      cachev1alpha1.ServerConfig{Host: host},
 		},
 	}
 }
@@ -26,8 +26,8 @@ func clusterCacheServer(host, proxy string) *cachev1alpha1.ClusterCacheServer {
 	return &cachev1alpha1.ClusterCacheServer{
 		ObjectMeta: metav1.ObjectMeta{Name: "valkey"},
 		Spec: cachev1alpha1.ClusterCacheServerSpec{
-			ServerCommon: common.ServerCommon{ProxyURL: proxy},
-			ServerConfig: cachev1alpha1.ServerConfig{Host: host},
+			CloudServerCommon: common.CloudServerCommon{ProxyURL: proxy},
+			ServerConfig:      cachev1alpha1.ServerConfig{Host: host},
 		},
 	}
 }
@@ -47,7 +47,7 @@ var serverCases = []struct {
 	{name: "host with a scheme", host: "rediss://valkey", field: "spec.host"},
 	{name: "host with a port", host: "valkey:6379", field: "spec.host"},
 	{name: "host with userinfo", host: "user:pass@valkey", field: "spec.host"},
-	{name: "empty host", host: "", field: "spec.host"},
+	{name: "empty host is for the schema to judge", host: ""},
 	{name: "host with a leading hyphen", host: "-valkey", field: "spec.host"},
 	{name: "proxy with another scheme", host: "valkey", proxy: "ftp://proxy", field: "spec.proxyURL", message: "http, https or socks5"},
 	{name: "proxy without a host", host: "valkey", proxy: "http://", field: "spec.proxyURL", message: "http, https or socks5"},

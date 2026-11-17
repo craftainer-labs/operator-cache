@@ -35,29 +35,32 @@ type Prober struct {
 	Check ProbeFunc
 }
 
-var _ probe.Prober = Prober{}
+var _ probe.CloudProber = Prober{}
 
-// Probe returns the version of the server srv names, or an error that names
-// only a category of failure.
-func (p Prober) Probe(ctx context.Context, srv server.Server, conn server.Connection) (string, error) {
+// ProbeCloud returns the version of the server srv names, or an error that names
+// only a category of failure. Both server kinds are read through the cloud
+// resolvers of lib-operator-go (server.ConnectionForCloud), which return the
+// self-hosted settings unchanged; a server with a provider has no admin Secret
+// and is not supported yet, so it fails as an unusable configuration.
+func (p Prober) ProbeCloud(ctx context.Context, srv server.CloudServer, conn server.CloudConnection) (probe.CloudResult, error) {
 	spec, err := serverConfigOf(srv)
 	if err != nil {
-		return "", err
+		return probe.CloudResult{}, err
 	}
 	dial, err := p.Config.Egress.HostDialer(conn.Proxy)
 	if err != nil {
-		return "", categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, err))
+		return probe.CloudResult{}, categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, err))
 	}
-	cfg, err := adminConfig(spec, conn, dial)
+	cfg, err := adminConfig(spec, conn.Connection, dial)
 	if err != nil {
-		return "", categoryOnly(err)
+		return probe.CloudResult{}, categoryOnly(err)
 	}
 	run := p.Check
 	if run == nil {
 		run = valkeyacl.Probe
 	}
 	version, err := run(ctx, cfg)
-	return version, categoryOnly(err)
+	return probe.CloudResult{Version: version}, categoryOnly(err)
 }
 
 // categoryOnly replaces the text of err with the fixed text of its kind. The
@@ -79,7 +82,7 @@ func categoryOnly(err error) error {
 }
 
 // serverConfigOf returns the Valkey fields of a server kind of this operator.
-func serverConfigOf(srv server.Server) (cachev1alpha1.ServerConfig, error) {
+func serverConfigOf(srv server.CloudServer) (cachev1alpha1.ServerConfig, error) {
 	switch s := srv.(type) {
 	case *cachev1alpha1.ClusterCacheServer:
 		return s.Spec.ServerConfig, nil

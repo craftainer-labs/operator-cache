@@ -34,11 +34,13 @@ const (
 type ServerConfig struct {
 	// host is the server's host name or IP address. It never carries a scheme,
 	// a port, a path or credentials: only letters, digits, dots, hyphens and
-	// colons (for an IPv6 address) are allowed.
+	// colons (for an IPv6 address) are allowed. It is required without
+	// spec.provider; with one it overrides the discovered address.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9.:-]+$`
-	Host string `json:"host"`
+	// +optional
+	Host string `json:"host,omitempty"`
 
 	// port is the server's TLS port.
 	// +kubebuilder:default=6379
@@ -63,8 +65,12 @@ func (c *ServerConfig) Address() string {
 	return net.JoinHostPort(c.Host, strconv.Itoa(int(port)))
 }
 
-// Endpoint returns the server's URL, rediss://host:port. It is what a server
-// kind's GetEndpoint returns.
+// Endpoint returns the server's URL, rediss://host:port, or "" when the server
+// sets no host (a cloud server whose address is discovered). It is what a
+// server kind's GetEndpoint returns.
 func (c *ServerConfig) Endpoint() string {
+	if c.Host == "" {
+		return ""
+	}
 	return EndpointScheme + "://" + c.Address()
 }

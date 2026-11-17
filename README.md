@@ -30,6 +30,23 @@ so a claim cannot name another namespace's keys. `@dangerous` and `@admin`
 commands are never granted. A `CacheUser` has no `deletionPolicy`: its ACL user
 is always deleted with the claim.
 
+### Cloud servers (API only so far)
+
+A server may instead set `provider` (AWS only; `type` is immutable) and `credentials`
+(`source` `WorkloadIdentity`, the default, or `Secret`; a namespaced server must
+use `Secret`), as in ADR 0002 section 16 of `lib-operator-go`. `provider.aws`
+holds `region`, an optional `roleARN`, on a cluster server an `endpointOverride`
+(for an emulator; honoured only with `EGRESS_MODE=allow-private`), and exactly
+one of `elasticache: {userGroupID, replicationGroupID}` and
+`memorydb: {aclName, clusterName}`. With a provider, `host` is optional (it
+overrides the discovered address) and `adminCredentialsSecretRef` is forbidden;
+without one, `host` and `adminCredentialsSecretRef` are required as before.
+`status.discovered` holds what the probe reads from the cloud.
+
+This version only carries the schema: a server with a provider is not probed and
+its claims wait with an unusable-configuration condition. The ElastiCache and
+MemoryDB users follow in the next change. Self-hosted servers are unchanged.
+
 ## Controllers
 
 One claim controller, `CacheUser`, built on `lifecycle.Reconcile` of lib-operator-go,
