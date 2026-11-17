@@ -1006,13 +1006,13 @@ func TestNewAWSClient(t *testing.T) {
 		ElastiCache: &cachev1alpha1.ElastiCacheTarget{UserGroupID: "group", ReplicationGroupID: "rg"},
 	}
 	c, err := NewAWSClient(ctx, s, cloud.Egress{})
-	if ec, ok := c.(awscache.ElastiCache); err != nil || !ok || ec.UserGroupID != "group" {
+	if ec, ok := c.(awscache.ElastiCache); err != nil || !ok || ec.UserGroupID != "group" || ec.ReplicationGroupID != "rg" {
 		t.Errorf("ElastiCache: %v, %v", c, err)
 	}
 	s.ElastiCache, s.MemoryDB = nil, &cachev1alpha1.MemoryDBTarget{ACLName: "acl", ClusterName: "c"}
 	if c, err = NewAWSClient(ctx, s, cloud.Egress{}); err != nil {
 		t.Fatal(err)
-	} else if mdb, ok := c.(awscache.MemoryDB); !ok || mdb.ACLName != "acl" {
+	} else if mdb, ok := c.(awscache.MemoryDB); !ok || mdb.ACLName != "acl" || mdb.ClusterName != "c" {
 		t.Errorf("MemoryDB: %v", c)
 	}
 	// An endpoint override needs the allow-private mode.
@@ -1021,3 +1021,73 @@ func TestNewAWSClient(t *testing.T) {
 		t.Errorf("endpoint override: %v", err)
 	}
 }
+
+// A claim that has waited for the cloud longer than PendingDeadline gets a
+// ReconcileError instead of one more Pending; anything else passes through.
+func TestPendingIsBounded(t *testing.T) {
+	ctx := context.Background()
+	_, x := awsExt(t, newMemAWS(), nil)
+	base := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	pending := lifecycle.Pending(pendingAfter, conditions.Updating, "waiting")
+	ready := func(status metav1.ConditionStatus, reason string) {
+		x.claim.Status.Conditions = []metav1.Condition{{Type: conditions.Ready, Status: status, Reason: reason, LastTransitionTime: metav1.NewTime(base)}}
+	}
+	at := func(d time.Duration) { x.now = func() time.Time { return base.Add(d) } }
+
+	// Without a Ready condition there is no clock.
+	at(PendingDeadline * 2)
+	if got := x.bounded(pending); !errors.Is(got, pending) {
+		t.Errorf("no condition: %v", got)
+	}
+	if x.bounded(nil) != nil || !errors.Is(x.bounded(errAPITest), errAPITest) {
+		t.Error("an error that is not a wait changed")
+	}
+	for _, reason := range pendingReasons {
+		ready(metav1.ConditionFalse, reason)
+		at(PendingDeadline)
+		if got := x.bounded(pending); !errors.Is(got, pending) {
+			t.Errorf("%s at the deadline: %v", reason, got)
+		}
+		at(PendingDeadline + time.Second)
+		if got := x.bounded(pending); !errors.Is(got, ErrPendingTimeout) {
+			t.Errorf("%s past the deadline: %v", reason, got)
+		}
+	}
+	// A Ready that is True, or False for another reason, is not a wait.
+	ready(metav1.ConditionTrue, conditions.Available)
+	if got := x.bounded(pending); !errors.Is(got, pending) {
+		t.Errorf("ready: %v", got)
+	}
+	ready(metav1.ConditionFalse, "NameCollision")
+	if got := x.bounded(pending); !errors.Is(got, pending) {
+		t.Errorf("another reason: %v", got)
+	}
+
+	// The real clock, when none is set.
+	x.now = nil
+	x.claim.Status.Conditions = []metav1.Condition{{
+		Type: conditions.Ready, Status: metav1.ConditionFalse, Reason: conditions.Creating, LastTransitionTime: metav1.NewTime(time.Now()),
+	}}
+	if got := x.bounded(pending); !errors.Is(got, pending) {
+		t.Errorf("recent: %v", got)
+	}
+	x.claim.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * PendingDeadline))
+	if got := x.bounded(pending); !errors.Is(got, ErrPendingTimeout) {
+		t.Errorf("old: %v", got)
+	}
+
+	// Observe reports it with its own fixed text, and logs nothing of the user.
+	api := newMemAWS()
+	ext, x := awsExt(t, api, nil)
+	activeUser(t, api, x).status = awscache.StatusModifying
+	x.claim.Status.Conditions = []metav1.Condition{{
+		Type: conditions.Ready, Status: metav1.ConditionFalse, Reason: conditions.Updating, LastTransitionTime: metav1.NewTime(base),
+	}}
+	at(PendingDeadline + time.Second)
+	_, err := ext.Observe(ctx, extSpec)
+	if !errors.Is(err, ErrPendingTimeout) || err.Error() != ErrPendingTimeout.Error() {
+		t.Errorf("observe: %v", err)
+	}
+}
+
+var errAPITest = errors.New("the API failed")

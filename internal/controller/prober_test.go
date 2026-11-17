@@ -3,15 +3,19 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
+	"github.com/craftainer-labs/operator-cache/internal/awscache"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
 )
 
@@ -163,18 +167,84 @@ func (p Prober) Probe(ctx context.Context, srv server.CloudServer, conn server.C
 	return res.Version, err
 }
 
-// A server with a provider is not probed: it fails as an unusable configuration
-// with its own text, before any admin login is read.
-func TestProberRefusesAProvider(t *testing.T) {
+// awsServers are a cluster server on ElastiCache and a namespaced one on
+// MemoryDB, both in eu-west-1.
+func awsServers() map[string]server.CloudServer {
 	cluster := &cachev1alpha1.ClusterCacheServer{}
-	cluster.Spec.Provider = &cachev1alpha1.ClusterProvider{}
+	cluster.Spec.Credentials = &cloud.Credentials{Source: cloud.SourceSecret}
+	cluster.Spec.Provider = &cachev1alpha1.ClusterProvider{Type: cloud.ProviderAWS, AWS: &cachev1alpha1.ClusterAWSCache{
+		AWSClusterBlock: cloud.AWSClusterBlock{AWSBlock: cloud.AWSBlock{Region: "eu-west-1"}},
+		AWSTarget:       cachev1alpha1.AWSTarget{ElastiCache: &cachev1alpha1.ElastiCacheTarget{UserGroupID: "g", ReplicationGroupID: "rg"}},
+	}}
 	namespaced := &cachev1alpha1.CacheServer{}
-	namespaced.Spec.Provider = &cachev1alpha1.Provider{}
-	for name, srv := range map[string]server.CloudServer{"cluster": cluster, "namespaced": namespaced} {
-		p, cfgs := probeFixture("9.1.2", nil)
-		_, err := p.Probe(context.Background(), srv, server.Connection{})
-		if !errors.Is(err, ErrCloudNotSupported) || !errors.Is(err, server.ErrInvalidServer) || len(*cfgs) != 0 {
-			t.Errorf("%s: %v, %d probes", name, err, len(*cfgs))
+	namespaced.Spec.Provider = &cachev1alpha1.Provider{Type: cloud.ProviderAWS, AWS: &cachev1alpha1.AWSCache{
+		AWSBlock:  cloud.AWSBlock{Region: "eu-west-1"},
+		AWSTarget: cachev1alpha1.AWSTarget{MemoryDB: &cachev1alpha1.MemoryDBTarget{ACLName: "acl", ClusterName: "c"}},
+	}}
+	return map[string]server.CloudServer{"cluster": cluster, "namespaced": namespaced}
+}
+
+func awsProber(api *memAWS) Prober {
+	return Prober{Config: Config{Egress: egress.NewPolicy(egress.ModeStrict), EgressMode: egress.ModeStrict, NewAWS: api.newClient}}
+}
+
+// A server with a provider is probed through the cloud's API, with the cloud
+// credentials of the connection and no admin login, and discovers the drafted
+// keys only.
+func TestProberDiscoversAnAWSServer(t *testing.T) {
+	for name, srv := range awsServers() {
+		api := newMemAWS()
+		api.target = awscache.Target{Endpoint: "cache.example.test", Port: 6380, ResourceID: "rg", AccountID: "111122223333", Version: "7.3"}
+		creds := map[string][]byte{"k": []byte("v")}
+		got, err := awsProber(api).ProbeCloud(context.Background(), srv, server.CloudConnection{Credentials: creds})
+		want := map[string]string{
+			cachev1alpha1.DiscoveredRegion: "eu-west-1", cachev1alpha1.DiscoveredEndpoint: "cache.example.test",
+			cachev1alpha1.DiscoveredPort: "6380", cachev1alpha1.DiscoveredResourceID: "rg", cachev1alpha1.DiscoveredAccountID: "111122223333",
 		}
+		if err != nil || got.Version != "7.3" || !maps.Equal(got.Discovered, want) {
+			t.Errorf("%s: %+v, %v", name, got, err)
+		}
+		if len(api.servers) != 1 || string(api.servers[0].Secret["k"]) != "v" || api.servers[0].Block.Region != "eu-west-1" {
+			t.Errorf("%s: client built for %+v", name, api.servers)
+		}
+	}
+	// What the service does not report is left out, never empty.
+	api := newMemAWS()
+	got, err := awsProber(api).ProbeCloud(context.Background(), awsServers()["cluster"], server.CloudConnection{})
+	if err != nil || got.Version != "" || !maps.Equal(got.Discovered, map[string]string{cachev1alpha1.DiscoveredRegion: "eu-west-1"}) {
+		t.Errorf("empty target: %+v, %v", got, err)
+	}
+}
+
+// A server whose cloud cannot be reached fails with a fixed text: no ARN, no
+// request id, no word of the service's own.
+func TestProberAWSFailuresAreCategoryOnly(t *testing.T) {
+	leak := "arn:aws:elasticache:eu-west-1:111122223333:user:secret req-1234"
+	for name, tc := range map[string]struct {
+		mutate func(*memAWS)
+		kind   error
+		text   string
+	}{
+		"build":    {func(m *memAWS) { m.buildErr = fmt.Errorf("%w: %s", cloud.ErrCredentialsUnavailable, leak) }, cloud.ErrCredentialsUnavailable, "the server's cloud credentials are not usable"},
+		"target":   {func(m *memAWS) { m.fail["Describe"] = fmt.Errorf("%w: %s", awscache.ErrTargetNotFound, leak) }, awscache.ErrTargetNotFound, "the user group or ACL the server names does not exist"},
+		"resource": {func(m *memAWS) { m.fail["Describe"] = fmt.Errorf("%w: %s", awscache.ErrResourceNotFound, leak) }, awscache.ErrResourceNotFound, "the replication group or cluster the server names does not exist"},
+		"service":  {func(m *memAWS) { m.fail["Describe"] = errors.New(leak) }, nil, defaultText},
+	} {
+		api := newMemAWS()
+		tc.mutate(api)
+		_, err := awsProber(api).ProbeCloud(context.Background(), awsServers()["cluster"], server.CloudConnection{})
+		if err == nil || err.Error() != tc.text || strings.Contains(err.Error(), "secret") || (tc.kind != nil && !errors.Is(err, tc.kind)) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// With no NewAWS the prober builds the SDK client of the operator, which checks
+// the credentials before any call: a Secret that is missing is refused.
+func TestProberAWSDefaultsToTheSDKClient(t *testing.T) {
+	p := Prober{Config: Config{Egress: egress.NewPolicy(egress.ModeStrict), EgressMode: egress.ModeStrict}}
+	_, err := p.ProbeCloud(context.Background(), awsServers()["cluster"], server.CloudConnection{})
+	if !errors.Is(err, cloud.ErrCredentialsUnavailable) {
+		t.Errorf("default client: %v", err)
 	}
 }

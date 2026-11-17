@@ -40,6 +40,42 @@ is server-side, so this lane checks what that fake only claims, against Valkey:
   create that crashed and is finished; a user without a record refused as a
   `NameCollision` and left unchanged; delete ending the user and its sessions.
 
+### The AWS backends (`awscloud/`, job `aws`)
+
+`awscloud/` is a package of its own, with the build tags `integration` and `moto`,
+so the Valkey job never compiles it. It runs the ElastiCache and MemoryDB backends
+(`internal/awscache`, and the probe and the claim External of `internal/controller`
+through `controller.NewIntegrationAWS` and `NewIntegrationAWSIAM`, which exist
+only with the `integration` tag) against moto server 5.2.5, pinned by digest and
+reached at its container address (a private range: `pkg/egress` refuses loopback
+in both modes), with `EGRESS_MODE=allow-private` in the test's own wiring only.
+A fake (`awscloud/fake_test.go`, an `httptest` server on a private, non-loopback
+address of the runner) sits in front of moto: it answers the calls moto 5.2.5
+lacks (ElastiCache `ModifyUser`, `DescribeUserGroups` and `ModifyUserGroup`;
+MemoryDB `DescribeACLs` and `UpdateACL`) and forwards everything else. For both
+engines the tests cover the probe (the discovered keys, and the refusals: strict
+mode, missing credentials, a missing user group or ACL, a missing replication
+group or cluster, with no address in the error) and the user lifecycle: create
+and join, active, rotation with two passwords and back to one, drift removing an
+extra password, delete, no adoption of a user that carries another claim's
+marker, and IAM users with their rebuilt binding.
+
+**Not checked here**, because neither moto nor the fake can: the data plane (no
+login to a real cluster, with a password or with IAM AUTH, is made); real IRSA or
+Pod Identity credentials (moto accepts any signature and enforces no IAM); AWS's
+own rules (how it normalises an access string, which passwords it accepts, its
+limits, throttling, and how long a change takes: the fake settles after one
+read); and the MemoryDB SDK's default wire protocol, smithy RPC v2 CBOR, which
+moto does not serve, so the MemoryDB tests switch the same client to AWS JSON
+1.1. See [NFR-0005](../../docs/nfrs/NFR-0005-what-the-aws-emulator-cannot-check.md).
+
+Run it as the workflow does: start moto, then
+
+```sh
+MOTO_ENDPOINT=http://<moto container ip>:5000 \
+  go test -tags integration,moto -race -count=1 ./test/integration/awscloud/...
+```
+
 Files:
 
 - `controller_test.go` — the controller's paths, as above.

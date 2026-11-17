@@ -20,6 +20,7 @@ type MDBAPI interface {
 	DescribeACLs(context.Context, *memorydb.DescribeACLsInput, ...func(*memorydb.Options)) (*memorydb.DescribeACLsOutput, error)
 	UpdateACL(context.Context, *memorydb.UpdateACLInput, ...func(*memorydb.Options)) (*memorydb.UpdateACLOutput, error)
 	ListTags(context.Context, *memorydb.ListTagsInput, ...func(*memorydb.Options)) (*memorydb.ListTagsOutput, error)
+	DescribeClusters(context.Context, *memorydb.DescribeClustersInput, ...func(*memorydb.Options)) (*memorydb.DescribeClustersOutput, error)
 }
 
 var _ MDBAPI = (*memorydb.Client)(nil)
@@ -29,13 +30,15 @@ type MemoryDB struct {
 	API MDBAPI
 	// ACLName is the ACL the administrator attached to the cluster.
 	ACLName string
+	// ClusterName is the cluster the ACL is attached to; only the probe reads it.
+	ClusterName string
 }
 
 var _ Client = MemoryDB{}
 
 // NewMemoryDB returns the Client of the ACL on the SDK's client.
-func NewMemoryDB(cfg aws.Config, aclName string) MemoryDB {
-	return MemoryDB{API: memorydb.NewFromConfig(cfg), ACLName: aclName}
+func NewMemoryDB(cfg aws.Config, aclName, clusterName string) MemoryDB {
+	return MemoryDB{API: memorydb.NewFromConfig(cfg), ACLName: aclName, ClusterName: clusterName}
 }
 
 // acl reads the ACL, or ErrTargetNotFound.
@@ -136,4 +139,27 @@ func (c MemoryDB) Delete(ctx context.Context, id string) error {
 		return nil
 	}
 	return err
+}
+
+// Describe implements Client. The address is the cluster's endpoint.
+func (c MemoryDB) Describe(ctx context.Context) (Target, error) {
+	if _, err := c.acl(ctx); err != nil {
+		return Target{}, err
+	}
+	out, err := c.API.DescribeClusters(ctx, &memorydb.DescribeClustersInput{ClusterName: aws.String(c.ClusterName)})
+	var missing *types.ClusterNotFoundFault
+	switch {
+	case errors.As(err, &missing):
+		return Target{}, ErrResourceNotFound
+	case err != nil:
+		return Target{}, err
+	case len(out.Clusters) == 0:
+		return Target{}, ErrResourceNotFound
+	}
+	cl := out.Clusters[0]
+	t := Target{ResourceID: c.ClusterName, AccountID: accountOf(aws.ToString(cl.ARN)), Version: aws.ToString(cl.EngineVersion)}
+	if ep := cl.ClusterEndpoint; ep != nil {
+		t.Endpoint, t.Port = aws.ToString(ep.Address), ep.Port
+	}
+	return t, nil
 }

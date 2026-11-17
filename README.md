@@ -47,9 +47,26 @@ pruned by the API server and ignored, not rejected.
 
 The administrator creates the replication group or cluster and its user group
 or ACL and attaches them; the operator only makes users and adds them to that
-user group or ACL. The server's probe does not read the cloud yet (it follows in
-the next change), so a server with a provider is not Ready and its claims wait
-until it is. Self-hosted servers are unchanged.
+user group or ACL. Self-hosted servers are unchanged.
+
+**The probe of a server with a provider** reads the cloud, with the credentials of
+the server (no admin login, no data-plane connection): `DescribeUserGroups` and
+`DescribeReplicationGroups` for ElastiCache, `DescribeACLs` and `DescribeClusters`
+for MemoryDB. It makes the server Ready when the user group or ACL and the
+replication group or cluster exist, and records in `status.discovered` only what
+ADR 0002 section 16 drafts: `endpoint` and `port` (the configuration endpoint, or
+the primary endpoint of the first node group; MemoryDB's cluster endpoint),
+`resourceId` (the replication group or cluster), `region` and, when the service
+names an ARN, `accountId`. A value the service does not report yet (a group that
+is still being created has no endpoint) is left out. MemoryDB also reports its
+engine version in `status.serverVersion`. A failure (missing credentials, a
+refused override, a group, ACL or cache that does not exist, an AWS error) leaves
+the server `Ready=False` with reason `ServerUnreachable` and the library's coarse
+message; the drafted reasons `TargetNotFound` and `EndpointOverrideForbidden` are
+not expressible through the library yet (a typed reason on the probe error is a
+later library change), and the operator does not write the status itself. The
+category is in the operator log. There is no `CloudResolved` condition. Claims on
+a server that is not Ready wait.
 
 #### Users on AWS
 
@@ -72,7 +89,11 @@ made with the AWS API (`ACL SETUSER` is refused by both services) through
   group or ACL, set the access string. After a step, and while the user or its
   group is not `active`, the claim is `Ready=False` with reason `Creating`,
   `Updating` or `Deleting` and `Synced=True`, and is looked at again after ten
-  seconds. Deleting calls `DeleteUser` and waits until the user is gone.
+  seconds. Deleting calls `DeleteUser` and waits until the user is gone. A claim
+  that has been not Ready for more than 30 minutes (`PendingDeadline`) is
+  reported as a `ReconcileError` ("the cloud did not finish changing the user in
+  time") instead of one more wait; the reconcile keeps looking, and the claim is
+  Ready as soon as the cloud settles.
 - The binding Secret has the keys of a self-hosted one (`host`, `port`,
   `username`, `password`, `uri`, `keyPrefix`; `sslrootcert` only when the server
   sets a CA bundle) and `cloud` (`aws`), `region` and `authMode`. The address is
@@ -217,8 +238,9 @@ This is the rule every Craftainer operator follows when a claim is deleted:
 from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind, wired in
 `internal/app`:
 
-- **What is probed:** a login as the ACL administrator (`ACL WHOAMI`) over
-  verified TLS. An answer proves both things the status promises: the server is
+- **What is probed:** on a self-hosted server, a login as the ACL administrator
+  (`ACL WHOAMI`) over verified TLS (a server with a provider is probed through the
+  cloud's API; see "Cloud servers"). An answer proves both things the status promises: the server is
   reachable and it accepts the admin credentials.
 - **The version** is read on the same connection: `INFO server`'s
   `valkey_version` (`redis_version` on Redis), or, when the admin's ACL does not
@@ -315,9 +337,16 @@ from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind, wired i
   reads the new password as the current one and sets `[new, new']`, which ends
   the password consumers still use. The window is the two writes between
   `RotateBegin` and the mark.
-- **The AWS client is built at every reconcile.** The credentials are resolved
-  and the SDK client made for each reconcile of a claim; nothing is cached
-  between them (the Valkey connection of a self-hosted server is).
+- **The AWS client is built at every reconcile, and a lookup is three calls.**
+  The credentials are resolved and the SDK client made for each reconcile of a
+  claim; nothing is cached between them (the Valkey connection of a self-hosted
+  server is). Each `Lookup` of a user is `DescribeUsers`, `DescribeUserGroups`
+  (or `DescribeACLs`) and `ListTagsForResource` (`ListTags`), and a claim that is
+  waiting is looked at every ten seconds, so many claims or a wide fleet of
+  waiting claims can meet the services' API throttling. Keep `healthCheckInterval`
+  and the claims' poll intervals long, and lower `--max-concurrent-reconciles`
+  if AWS throttles; a throttled call is a failed reconcile that the library
+  retries with backoff.
 - **The data plane of an AWS server is untested here.** The tests run against
   an AWS emulator, which does not validate IAM tokens, and a real IRSA or Pod
   Identity identity is not exercised in CI: whether `AUTH` with a token works, and

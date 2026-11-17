@@ -44,9 +44,9 @@ func NewAWSClient(ctx context.Context, s AWSServer, eg cloud.Egress) (awscache.C
 		return nil, err
 	}
 	if s.MemoryDB != nil {
-		return awscache.NewMemoryDB(cfg, s.MemoryDB.ACLName), nil
+		return awscache.NewMemoryDB(cfg, s.MemoryDB.ACLName, s.MemoryDB.ClusterName), nil
 	}
-	return awscache.NewElastiCache(cfg, s.ElastiCache.UserGroupID), nil
+	return awscache.NewElastiCache(cfg, s.ElastiCache.UserGroupID, s.ElastiCache.ReplicationGroupID), nil
 }
 
 // awsBackend is a resolved AWS server: its data-plane address, for the binding,

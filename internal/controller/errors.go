@@ -29,9 +29,6 @@ var (
 	ErrInvalidSpec = errors.New("the user's profile or namespace is not valid")
 	// ErrAdminCredentials means the admin Secret lacks the username or password.
 	ErrAdminCredentials = errors.New("the admin Secret needs the keys username and password")
-	// ErrCloudNotSupported means the server has a provider, and this version
-	// reaches only self-hosted servers.
-	ErrCloudNotSupported = errors.New("a server with a provider is not supported in this version")
 	// ErrAuthModeUnsupported means the claim asks for authMode IAM on a server
 	// that has no provider. The text starts with the claim reason of ADR 0002,
 	// section 16.1, which is also the Event's reason.
@@ -40,6 +37,9 @@ var (
 	// is named by the operator and the consumer's role is authorized by the ARN
 	// in the binding Secret.
 	ErrIAMPrincipalRefused = errors.New("IAMPrincipalRequired: iam.principal is not used on AWS")
+	// ErrPendingTimeout means the cloud has not finished changing the user, its
+	// group or its ACL within PendingDeadline of the claim last going not Ready.
+	ErrPendingTimeout = errors.New("the cloud did not finish changing the user in time; the operator keeps looking")
 	// ErrAddressUnknown means the server sets no host and its probe has not
 	// discovered an endpoint, so no binding can be built.
 	ErrAddressUnknown = errors.New("the server's address is not known yet: it sets no host and none has been discovered")
@@ -106,7 +106,9 @@ var rules = []rule{
 	{is(ErrAuthModeUnsupported), "", false},
 	{is(ErrIAMPrincipalRefused), "", false},
 	{is(ErrAddressUnknown), "", false},
+	{is(ErrPendingTimeout), "", false},
 	{is(awscache.ErrTargetNotFound), "the user group or ACL the server names does not exist", false},
+	{is(awscache.ErrResourceNotFound), "the replication group or cluster the server names does not exist", false},
 	{is(cloud.ErrCredentialsUnavailable), "the server's cloud credentials are not usable", false},
 	{is(cloud.ErrWorkloadIdentityForbidden), "the server's cloud credentials are not usable", false},
 	{is(cloud.ErrEndpointOverrideForbidden), "the server's endpoint override is not allowed", false},
@@ -116,7 +118,6 @@ var rules = []rule{
 	{is(server.ErrAdminSecretNamespaceForbidden), "the server's admin credentials are not usable", false},
 	{is(server.ErrCredentialsSecretNamespaceForbidden), "the server's cloud credentials are not usable", false},
 	{is(server.ErrCredentialsUnavailable), "the server's cloud credentials are not usable", false},
-	{is(ErrCloudNotSupported), "a server with a provider is not supported in this version", false},
 	{is(server.ErrInvalidServer), "the server's configuration or admin credentials are not usable", false},
 	{is(server.ErrOperatorNamespaceUnset), "the server's configuration or admin credentials are not usable", false},
 	{isEgress, "the connection to the server was refused by the egress policy", true},

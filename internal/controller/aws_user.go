@@ -10,6 +10,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -20,6 +22,14 @@ import (
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 	"github.com/craftainer-labs/operator-cache/internal/awscache"
 )
+
+// PendingDeadline is how long a claim may wait for the cloud: when Ready has been
+// False for longer, a user or group that has still not settled is reported as a
+// ReconcileError (ErrPendingTimeout) instead of Pending, which says nothing about
+// how long it has been. The reconcile keeps looking, with the library's backoff,
+// and the claim becomes Ready as soon as the cloud settles. A settled user never
+// reaches this: it is for a cloud that does not finish.
+const PendingDeadline = 30 * time.Minute
 
 // pendingAfter is how soon a claim looks at an AWS user again after a write or
 // while the user is not active (ADR 0002, section 16.6).
@@ -47,6 +57,8 @@ type awsUser struct {
 	binding func(context.Context) (*corev1.Secret, error)
 	// rec records the Events of a drift; nil records none.
 	rec events.EventRecorder
+	// now is the clock of the deadline; nil is time.Now.
+	now func() time.Time
 }
 
 // awsPassword is the External of a Password-mode claim: a Rotator.
@@ -99,6 +111,34 @@ func (e *awsUser) access(spec cachev1alpha1.CacheUserSpec) (string, error) {
 	}
 	return s, nil
 }
+
+// bounded turns a PendingError into ErrPendingTimeout once the claim has been not
+// Ready for longer than PendingDeadline, and passes every other error (and nil)
+// through. The time is the Ready condition's lastTransitionTime, which the
+// library moves only when Ready changes status, so a claim that goes from
+// Creating to Updating to a ReconcileError and back keeps its clock.
+func (e *awsUser) bounded(err error) error {
+	var p *lifecycle.PendingError
+	if !errors.As(err, &p) {
+		return err
+	}
+	c := meta.FindStatusCondition(e.claim.Status.Conditions, conditions.Ready)
+	if c == nil || c.Status != metav1.ConditionFalse || !slices.Contains(pendingReasons, c.Reason) {
+		return err
+	}
+	now := time.Now
+	if e.now != nil {
+		now = e.now
+	}
+	if now().Sub(c.LastTransitionTime.Time) <= PendingDeadline {
+		return err
+	}
+	return ErrPendingTimeout
+}
+
+// pendingReasons are the reasons of a Ready=False that the deadline counts: a
+// wait for the cloud, and the error that the wait turns into.
+var pendingReasons = []string{conditions.Creating, conditions.Updating, conditions.Deleting, conditions.ReconcileError}
 
 // pendingOf reports a user or group that has not settled as a PendingError, and
 // an active one as nil.
@@ -155,7 +195,7 @@ func (e *awsUser) collision() error {
 // claim's is refused and never adopted, changed or deleted.
 func (e *awsUser) Observe(ctx context.Context, spec cachev1alpha1.CacheUserSpec) (lifecycle.Observation[userState], error) {
 	obs, err := e.observe(ctx, spec)
-	return obs, coarse(ctx, "observe", err)
+	return obs, coarse(ctx, "observe", e.bounded(err))
 }
 
 func (e *awsUser) observe(ctx context.Context, spec cachev1alpha1.CacheUserSpec) (lifecycle.Observation[userState], error) {
@@ -271,7 +311,7 @@ func (e *awsUser) create(ctx context.Context, spec cachev1alpha1.CacheUserSpec) 
 // not issue. The binding Secret is not rewritten here; Observe finds the next
 // step once the user is active.
 func (e *awsUser) Update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, st userState) (binding.Data, error) {
-	return nil, coarse(ctx, "update", e.update(ctx, spec, st))
+	return nil, coarse(ctx, "update", e.bounded(e.update(ctx, spec, st)))
 }
 
 func (e *awsUser) update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, st userState) error {
@@ -317,7 +357,7 @@ func (e *awsUser) update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, 
 // reports it until it is gone. Reconcile never gets here for a claim with no
 // record of a create.
 func (e *awsUser) Delete(ctx context.Context, _ userState) error {
-	return coarse(ctx, "delete", e.remove(ctx))
+	return coarse(ctx, "delete", e.bounded(e.remove(ctx)))
 }
 
 func (e *awsUser) remove(ctx context.Context) error {

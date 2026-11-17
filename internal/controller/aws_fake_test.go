@@ -33,6 +33,8 @@ type memAWS struct {
 	fail        map[string]error
 	// created and modified are the Specs the writes got.
 	created, modified []awscache.Spec
+	// target is what Describe returns.
+	target awscache.Target
 	// servers are the AWSServers the client was built for; buildErr fails the build.
 	servers  []AWSServer
 	buildErr error
@@ -121,6 +123,15 @@ func (m *memAWS) Lookup(_ context.Context, id string) (awscache.User, error) {
 		ARN: u.arn, Status: u.status, AccessString: u.access, Passwords: len(u.passwords), Member: m.member[id],
 		GroupStatus: m.groupStatus, Marker: u.marker,
 	}, nil
+}
+
+func (m *memAWS) Describe(context.Context) (awscache.Target, error) {
+	if err := m.enter("Describe"); err != nil {
+		return awscache.Target{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.target, nil
 }
 
 func (m *memAWS) Create(_ context.Context, id string, s awscache.Spec) (string, error) {

@@ -21,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
-	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
@@ -222,25 +221,17 @@ func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef
 	if ref.Kind == kindClusterCacheServer {
 		var s cachev1alpha1.ClusterCacheServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
-		obj := serverObject{uid: s.UID, generation: s.Generation, cfg: s.Spec.ServerConfig, conditions: s.Status.Conditions, discovered: s.Status.Discovered}
-		if p := s.Spec.Provider; p != nil && p.AWS != nil {
-			obj.aws = &AWSServer{
-				Scope: cloud.ScopeCluster, Block: p.AWS.AWSClusterBlock, Credentials: s.Spec.Credentials,
-				ElastiCache: p.AWS.ElastiCache, MemoryDB: p.AWS.MemoryDB,
-			}
-		}
-		return obj, err
+		return serverObject{
+			uid: s.UID, generation: s.Generation, cfg: s.Spec.ServerConfig, conditions: s.Status.Conditions,
+			discovered: s.Status.Discovered, aws: clusterAWS(&s),
+		}, err
 	}
 	var s cachev1alpha1.CacheServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
-	obj := serverObject{uid: s.UID, generation: s.Generation, cfg: s.Spec.ServerConfig, conditions: s.Status.Conditions, discovered: s.Status.Discovered}
-	if p := s.Spec.Provider; p != nil && p.AWS != nil {
-		obj.aws = &AWSServer{
-			Scope: cloud.ScopeNamespaced, Block: cloud.AWSClusterBlock{AWSBlock: p.AWS.AWSBlock},
-			Credentials: s.Spec.Credentials.AsCredentials(), ElastiCache: p.AWS.ElastiCache, MemoryDB: p.AWS.MemoryDB,
-		}
-	}
-	return obj, err
+	return serverObject{
+		uid: s.UID, generation: s.Generation, cfg: s.Spec.ServerConfig, conditions: s.Status.Conditions,
+		discovered: s.Status.Discovered, aws: namespacedAWS(&s),
+	}, err
 }
 
 // stamp identifies what a cached connection was made from: the server object
