@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strconv"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/probe"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
@@ -37,18 +39,20 @@ type Prober struct {
 
 var _ probe.CloudProber = Prober{}
 
-// ProbeCloud returns the version of the server srv names, or an error that names
-// only a category of failure. Both server kinds are read through the cloud
-// resolvers of lib-operator-go (server.ConnectionForCloud), which return the
-// self-hosted settings unchanged; a server with a provider has no admin Secret
-// and is not supported yet, so it fails as an unusable configuration.
+// ProbeCloud returns what the probe reads of the server srv names, or an error
+// that names only a category of failure. Both server kinds are read through the
+// cloud resolvers of lib-operator-go (server.ConnectionForCloud), which return
+// the self-hosted settings unchanged. A server with a provider has no admin
+// Secret and no connection of its own: the probe asks the cloud's API whether
+// the user group or ACL, and the replication group or cluster it is attached
+// to, exist, and discovers the data-plane address.
 func (p Prober) ProbeCloud(ctx context.Context, srv server.CloudServer, conn server.CloudConnection) (probe.CloudResult, error) {
-	spec, provider, err := serverConfigOf(srv)
+	spec, aws, err := serverConfigOf(srv)
 	if err != nil {
 		return probe.CloudResult{}, err
 	}
-	if provider {
-		return probe.CloudResult{}, categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrCloudNotSupported))
+	if aws != nil {
+		return p.probeAWS(ctx, *aws, conn)
 	}
 	dial, err := p.Config.Egress.HostDialer(conn.Proxy)
 	if err != nil {
@@ -64,6 +68,48 @@ func (p Prober) ProbeCloud(ctx context.Context, srv server.CloudServer, conn ser
 	}
 	version, err := run(ctx, cfg)
 	return probe.CloudResult{Version: version}, categoryOnly(err)
+}
+
+// probeAWS reads an AWS server: it builds the client the claims use (through
+// the egress policy, with the credentials the library resolved) and asks the
+// service for the user group or ACL and the cache they are attached to. Any
+// failure leaves the server not Ready (the library reports it as
+// ServerUnreachable); the drafted reasons TargetNotFound and
+// EndpointOverrideForbidden cannot be expressed through the library yet, so the
+// condition carries the library's coarse message and the category is in the log.
+//
+// What it discovers is the drafted set only: the data-plane endpoint and port,
+// the replication group or cluster, the account (from the resource's ARN, when
+// the service names one) and the region of the server. A key whose value is not
+// known is left out, never empty. The engine version is MemoryDB's; ElastiCache
+// reports none on a replication group.
+func (p Prober) probeAWS(ctx context.Context, s AWSServer, conn server.CloudConnection) (probe.CloudResult, error) {
+	s.Secret = conn.Credentials
+	newAWS := p.Config.NewAWS
+	if newAWS == nil {
+		newAWS = NewAWSClient
+	}
+	api, err := newAWS(ctx, s, cloud.Egress{Mode: p.Config.EgressMode, Policy: p.Config.Egress, Proxy: conn.Proxy})
+	if err != nil {
+		return probe.CloudResult{}, categoryOnly(err)
+	}
+	t, err := api.Describe(ctx)
+	if err != nil {
+		return probe.CloudResult{}, categoryOnly(err)
+	}
+	d := map[string]string{cachev1alpha1.DiscoveredRegion: s.Block.Region}
+	for k, v := range map[string]string{
+		cachev1alpha1.DiscoveredEndpoint: t.Endpoint, cachev1alpha1.DiscoveredResourceID: t.ResourceID,
+		cachev1alpha1.DiscoveredAccountID: t.AccountID,
+	} {
+		if v != "" {
+			d[k] = v
+		}
+	}
+	if t.Port > 0 {
+		d[cachev1alpha1.DiscoveredPort] = strconv.Itoa(int(t.Port))
+	}
+	return probe.CloudResult{Version: t.Version, Discovered: d}, nil
 }
 
 // categoryOnly replaces the text of err with the fixed text of its kind. The
@@ -85,13 +131,37 @@ func categoryOnly(err error) error {
 }
 
 // serverConfigOf returns the Valkey fields of a server kind of this operator
-// and whether the server has a provider.
-func serverConfigOf(srv server.CloudServer) (cachev1alpha1.ServerConfig, bool, error) {
+// and, for a server with a provider, its AWS settings (nil when it has none).
+func serverConfigOf(srv server.CloudServer) (cachev1alpha1.ServerConfig, *AWSServer, error) {
 	switch s := srv.(type) {
 	case *cachev1alpha1.ClusterCacheServer:
-		return s.Spec.ServerConfig, s.Spec.Provider != nil, nil
+		return s.Spec.ServerConfig, clusterAWS(s), nil
 	case *cachev1alpha1.CacheServer:
-		return s.Spec.ServerConfig, s.Spec.Provider != nil, nil
+		return s.Spec.ServerConfig, namespacedAWS(s), nil
 	}
-	return cachev1alpha1.ServerConfig{}, false, fmt.Errorf("%w: %T", server.ErrUnknownServerKind, srv)
+	return cachev1alpha1.ServerConfig{}, nil, fmt.Errorf("%w: %T", server.ErrUnknownServerKind, srv)
+}
+
+// clusterAWS is the AWS side of a cluster server, nil without a provider.
+func clusterAWS(s *cachev1alpha1.ClusterCacheServer) *AWSServer {
+	p := s.Spec.Provider
+	if p == nil || p.AWS == nil {
+		return nil
+	}
+	return &AWSServer{
+		Scope: cloud.ScopeCluster, Block: p.AWS.AWSClusterBlock, Credentials: s.Spec.Credentials,
+		ElastiCache: p.AWS.ElastiCache, MemoryDB: p.AWS.MemoryDB,
+	}
+}
+
+// namespacedAWS is the AWS side of a namespaced server, nil without a provider.
+func namespacedAWS(s *cachev1alpha1.CacheServer) *AWSServer {
+	p := s.Spec.Provider
+	if p == nil || p.AWS == nil {
+		return nil
+	}
+	return &AWSServer{
+		Scope: cloud.ScopeNamespaced, Block: cloud.AWSClusterBlock{AWSBlock: p.AWS.AWSBlock},
+		Credentials: s.Spec.Credentials.AsCredentials(), ElastiCache: p.AWS.ElastiCache, MemoryDB: p.AWS.MemoryDB,
+	}
 }

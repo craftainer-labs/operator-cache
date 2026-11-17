@@ -40,6 +40,9 @@ var (
 	// ErrTargetNotFound means the user group or ACL the server names does not
 	// exist, so no user can join it.
 	ErrTargetNotFound = errors.New("the user group or ACL of the server does not exist")
+	// ErrResourceNotFound means the replication group or cluster the server
+	// names does not exist.
+	ErrResourceNotFound = errors.New("the replication group or cluster of the server does not exist")
 )
 
 // maxTagValueLen is the longest tag value AWS accepts.
@@ -72,6 +75,30 @@ func UserID(namespace, name string) string {
 		id = strings.ReplaceAll(id, "--", "-")
 	}
 	return prefix + id
+}
+
+// Target is what a probe reads of a server's cache: the data-plane address and
+// the ids that belong to it. Every field may be empty or zero when the service
+// does not report it (a group that is still being created has no endpoint).
+type Target struct {
+	// Endpoint and Port are the data-plane address.
+	Endpoint string
+	Port     int32
+	// ResourceID is the replication group or the cluster.
+	ResourceID string
+	// AccountID is the account of the resource's ARN.
+	AccountID string
+	// Version is the engine version, where the service reports one.
+	Version string
+}
+
+// accountOf is the account of an ARN, "" for anything that is not one.
+func accountOf(arn string) string {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) < 6 {
+		return ""
+	}
+	return parts[4]
 }
 
 // User is a user as the service reports it.
@@ -118,6 +145,10 @@ type Client interface {
 	Modify(ctx context.Context, id string, s Spec) error
 	// Join adds the user to the group or ACL.
 	Join(ctx context.Context, id string) error
+	// Describe reads the cache the user group or ACL is attached to, and checks
+	// that the group or ACL exists: ErrTargetNotFound or ErrResourceNotFound
+	// when one of them is missing.
+	Describe(ctx context.Context) (Target, error)
 	// Delete deletes the user, which takes it out of every group; a user that is
 	// already gone is a success.
 	Delete(ctx context.Context, id string) error

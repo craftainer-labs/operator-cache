@@ -89,7 +89,7 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 // awsExternal is the External of a claim on an AWS server.
 func (r *UserReconciler) awsExternal(be *backend, u *cachev1alpha1.CacheUser, pre error, persist func(context.Context) error, read func(context.Context) (*corev1.Secret, error)) lifecycle.External[cachev1alpha1.CacheUserSpec, userState] {
 	ext, x := newAWSExternal(be, u)
-	x.pre, x.rec, x.persist, x.binding = pre, r.Recorder, persist, read
+	x.pre, x.rec, x.persist, x.binding, x.now = pre, r.Recorder, persist, read, r.Now
 	return ext
 }
 

@@ -26,7 +26,13 @@
   tests (build tag `integration`) with verified connections, after linting that
   package with `golangci-lint --build-tags integration`. A step-started
   container, not a `services:` one, because the certificates and the
-  configuration come from the checkout.
+  configuration come from the checkout. A second job, `aws`, starts moto server
+  5.2.5 (pinned by digest) and runs `test/integration/awscloud` (tags
+  `integration,moto`) against it and a fake for the calls moto lacks, for
+  ElastiCache and MemoryDB, at private addresses with `EGRESS_MODE=allow-private`
+  in the test's own wiring only. It does not check the data plane (IAM AUTH
+  against a real cluster), real IRSA or AWS's access-string normalisation; see
+  [NFR-0005](../../docs/nfrs/NFR-0005-what-the-aws-emulator-cannot-check.md).
 - `release-extras.yml` — manually dispatched with a `tag` input, right after
   each `Release`: `gh workflow run release-extras.yml -f tag=vX.Y.Z`. Publishes
   the Helm chart (OCI), the OLM bundle image and the file-based catalog image

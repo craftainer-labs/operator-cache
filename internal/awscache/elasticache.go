@@ -21,6 +21,7 @@ type ECAPI interface {
 	DescribeUserGroups(context.Context, *elasticache.DescribeUserGroupsInput, ...func(*elasticache.Options)) (*elasticache.DescribeUserGroupsOutput, error)
 	ModifyUserGroup(context.Context, *elasticache.ModifyUserGroupInput, ...func(*elasticache.Options)) (*elasticache.ModifyUserGroupOutput, error)
 	ListTagsForResource(context.Context, *elasticache.ListTagsForResourceInput, ...func(*elasticache.Options)) (*elasticache.ListTagsForResourceOutput, error)
+	DescribeReplicationGroups(context.Context, *elasticache.DescribeReplicationGroupsInput, ...func(*elasticache.Options)) (*elasticache.DescribeReplicationGroupsOutput, error)
 }
 
 var _ ECAPI = (*elasticache.Client)(nil)
@@ -31,13 +32,16 @@ type ElastiCache struct {
 	// UserGroupID is the user group the administrator attached to the
 	// replication group.
 	UserGroupID string
+	// ReplicationGroupID is the replication group the user group is attached
+	// to; only the probe reads it.
+	ReplicationGroupID string
 }
 
 var _ Client = ElastiCache{}
 
 // NewElastiCache returns the Client of the user group on the SDK's client.
-func NewElastiCache(cfg aws.Config, userGroupID string) ElastiCache {
-	return ElastiCache{API: elasticache.NewFromConfig(cfg), UserGroupID: userGroupID}
+func NewElastiCache(cfg aws.Config, userGroupID, replicationGroupID string) ElastiCache {
+	return ElastiCache{API: elasticache.NewFromConfig(cfg), UserGroupID: userGroupID, ReplicationGroupID: replicationGroupID}
 }
 
 // group reads the user group, or ErrTargetNotFound.
@@ -145,4 +149,33 @@ func (c ElastiCache) Delete(ctx context.Context, id string) error {
 		return nil
 	}
 	return err
+}
+
+// Describe implements Client. The address is the replication group's
+// configuration endpoint (cluster mode) or the primary endpoint of its first
+// node group.
+func (c ElastiCache) Describe(ctx context.Context) (Target, error) {
+	if _, err := c.group(ctx); err != nil {
+		return Target{}, err
+	}
+	out, err := c.API.DescribeReplicationGroups(ctx, &elasticache.DescribeReplicationGroupsInput{ReplicationGroupId: aws.String(c.ReplicationGroupID)})
+	var missing *types.ReplicationGroupNotFoundFault
+	switch {
+	case errors.As(err, &missing):
+		return Target{}, ErrResourceNotFound
+	case err != nil:
+		return Target{}, err
+	case len(out.ReplicationGroups) == 0:
+		return Target{}, ErrResourceNotFound
+	}
+	g := out.ReplicationGroups[0]
+	t := Target{ResourceID: c.ReplicationGroupID, AccountID: accountOf(aws.ToString(g.ARN))}
+	ep := g.ConfigurationEndpoint
+	if ep == nil && len(g.NodeGroups) > 0 {
+		ep = g.NodeGroups[0].PrimaryEndpoint
+	}
+	if ep != nil {
+		t.Endpoint, t.Port = aws.ToString(ep.Address), aws.ToInt32(ep.Port)
+	}
+	return t, nil
 }

@@ -64,6 +64,7 @@ type fakeEC struct {
 	users  []ectypes.User
 	groups []ectypes.UserGroup
 	tags   []ectypes.Tag
+	rgs    []ectypes.ReplicationGroup
 	errs   map[string]error
 
 	created  *elasticache.CreateUserInput
@@ -104,6 +105,10 @@ func (f *fakeEC) ListTagsForResource(context.Context, *elasticache.ListTagsForRe
 	return &elasticache.ListTagsForResourceOutput{TagList: f.tags}, f.errs["ListTagsForResource"]
 }
 
+func (f *fakeEC) DescribeReplicationGroups(context.Context, *elasticache.DescribeReplicationGroupsInput, ...func(*elasticache.Options)) (*elasticache.DescribeReplicationGroupsOutput, error) {
+	return &elasticache.DescribeReplicationGroupsOutput{ReplicationGroups: f.rgs}, f.errs["DescribeReplicationGroups"]
+}
+
 func newFakeEC() *fakeEC {
 	return &fakeEC{
 		users: []ectypes.User{{
@@ -112,7 +117,11 @@ func newFakeEC() *fakeEC {
 		}},
 		groups: []ectypes.UserGroup{{UserGroupId: aws.String("g"), Status: aws.String("active"), UserIds: []string{"default", "u1"}, Engine: aws.String("redis")}},
 		tags:   []ectypes.Tag{{Key: aws.String("other"), Value: aws.String("x")}, {Key: aws.String(MarkerKey), Value: aws.String("ns/n/uid")}},
-		errs:   map[string]error{},
+		rgs: []ectypes.ReplicationGroup{{
+			ARN:        aws.String("arn:aws:elasticache:eu-west-1:111122223333:replicationgroup:rg"),
+			NodeGroups: []ectypes.NodeGroup{{PrimaryEndpoint: &ectypes.Endpoint{Address: aws.String("master.rg.example.test"), Port: aws.Int32(6379)}}},
+		}},
+		errs: map[string]error{},
 	}
 }
 
@@ -221,6 +230,7 @@ type fakeMDB struct {
 	users []mdbtypes.User
 	acls  []mdbtypes.ACL
 	tags  []mdbtypes.Tag
+	cls   []mdbtypes.Cluster
 	errs  map[string]error
 
 	created  *memorydb.CreateUserInput
@@ -261,6 +271,10 @@ func (f *fakeMDB) ListTags(context.Context, *memorydb.ListTagsInput, ...func(*me
 	return &memorydb.ListTagsOutput{TagList: f.tags}, f.errs["ListTags"]
 }
 
+func (f *fakeMDB) DescribeClusters(context.Context, *memorydb.DescribeClustersInput, ...func(*memorydb.Options)) (*memorydb.DescribeClustersOutput, error) {
+	return &memorydb.DescribeClustersOutput{Clusters: f.cls}, f.errs["DescribeClusters"]
+}
+
 func newFakeMDB() *fakeMDB {
 	return &fakeMDB{
 		users: []mdbtypes.User{{
@@ -269,6 +283,10 @@ func newFakeMDB() *fakeMDB {
 		}},
 		acls: []mdbtypes.ACL{{Name: aws.String("acl"), Status: aws.String("modifying"), UserNames: []string{"u1"}}},
 		tags: []mdbtypes.Tag{{Key: aws.String("other"), Value: aws.String("x")}, {Key: aws.String(MarkerKey), Value: aws.String("ns/n/uid")}},
+		cls: []mdbtypes.Cluster{{
+			ARN: aws.String("arn:aws:memorydb:eu-west-1:111122223333:cluster:c"), EngineVersion: aws.String("7.3"),
+			ClusterEndpoint: &mdbtypes.Endpoint{Address: aws.String("clustercfg.c.example.test"), Port: 6379},
+		}},
 		errs: map[string]error{},
 	}
 }
@@ -367,10 +385,95 @@ func TestMemoryDBWrites(t *testing.T) {
 // The constructors wrap the SDK clients of a configuration; they make no call.
 func TestConstructors(t *testing.T) {
 	cfg := aws.Config{Region: "eu-west-1"}
-	if c := NewElastiCache(cfg, "g"); c.API == nil || c.UserGroupID != "g" {
+	if c := NewElastiCache(cfg, "g", "rg"); c.API == nil || c.UserGroupID != "g" || c.ReplicationGroupID != "rg" {
 		t.Errorf("NewElastiCache = %+v", c)
 	}
-	if c := NewMemoryDB(cfg, "acl"); c.API == nil || c.ACLName != "acl" {
+	if c := NewMemoryDB(cfg, "acl", "c"); c.API == nil || c.ACLName != "acl" || c.ClusterName != "c" {
 		t.Errorf("NewMemoryDB = %+v", c)
+	}
+}
+
+func TestAccountOf(t *testing.T) {
+	for in, want := range map[string]string{
+		"arn:aws:elasticache:eu-west-1:111122223333:replicationgroup:rg": "111122223333",
+		"arn:aws:memorydb:eu-west-1::cluster:c":                          "",
+		"not-an-arn":                                                     "", "": "",
+	} {
+		if got := accountOf(in); got != want {
+			t.Errorf("accountOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestElastiCacheDescribe(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeEC()
+	c := ElastiCache{API: f, UserGroupID: "g", ReplicationGroupID: "rg"}
+	got, err := c.Describe(ctx)
+	want := Target{Endpoint: "master.rg.example.test", Port: 6379, ResourceID: "rg", AccountID: "111122223333"}
+	if err != nil || got != want {
+		t.Errorf("Describe = %+v, %v; want %+v", got, err, want)
+	}
+
+	// A cluster-mode group has a configuration endpoint, which wins.
+	f.rgs[0].ConfigurationEndpoint = &ectypes.Endpoint{Address: aws.String("clustercfg.rg.example.test"), Port: aws.Int32(6380)}
+	if got, err = c.Describe(ctx); err != nil || got.Endpoint != "clustercfg.rg.example.test" || got.Port != 6380 {
+		t.Errorf("Describe in cluster mode = %+v, %v", got, err)
+	}
+
+	// A group that is still being created has no endpoint yet.
+	f.rgs[0] = ectypes.ReplicationGroup{}
+	if got, err = c.Describe(ctx); err != nil || got.Endpoint != "" || got.Port != 0 || got.ResourceID != "rg" || got.AccountID != "" {
+		t.Errorf("Describe without an endpoint = %+v, %v", got, err)
+	}
+
+	for name, tc := range map[string]struct {
+		mutate func(f *fakeEC)
+		want   error
+	}{
+		"group missing": {func(f *fakeEC) { f.groups = nil }, ErrTargetNotFound},
+		"group failure": {func(f *fakeEC) { f.errs["DescribeUserGroups"] = errAPI }, errAPI},
+		"rg fault":      {func(f *fakeEC) { f.errs["DescribeReplicationGroups"] = &ectypes.ReplicationGroupNotFoundFault{} }, ErrResourceNotFound},
+		"no rg":         {func(f *fakeEC) { f.rgs = nil }, ErrResourceNotFound},
+		"rg failure":    {func(f *fakeEC) { f.errs["DescribeReplicationGroups"] = errAPI }, errAPI},
+	} {
+		f := newFakeEC()
+		tc.mutate(f)
+		if _, err := (ElastiCache{API: f, UserGroupID: "g", ReplicationGroupID: "rg"}).Describe(ctx); !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestMemoryDBDescribe(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeMDB()
+	c := MemoryDB{API: f, ACLName: "acl", ClusterName: "c"}
+	got, err := c.Describe(ctx)
+	want := Target{Endpoint: "clustercfg.c.example.test", Port: 6379, ResourceID: "c", AccountID: "111122223333", Version: "7.3"}
+	if err != nil || got != want {
+		t.Errorf("Describe = %+v, %v; want %+v", got, err, want)
+	}
+
+	f.cls[0] = mdbtypes.Cluster{}
+	if got, err = c.Describe(ctx); err != nil || got.Endpoint != "" || got.Port != 0 || got.ResourceID != "c" {
+		t.Errorf("Describe without an endpoint = %+v, %v", got, err)
+	}
+
+	for name, tc := range map[string]struct {
+		mutate func(f *fakeMDB)
+		want   error
+	}{
+		"acl missing":     {func(f *fakeMDB) { f.acls = nil }, ErrTargetNotFound},
+		"acl failure":     {func(f *fakeMDB) { f.errs["DescribeACLs"] = errAPI }, errAPI},
+		"cluster fault":   {func(f *fakeMDB) { f.errs["DescribeClusters"] = &mdbtypes.ClusterNotFoundFault{} }, ErrResourceNotFound},
+		"no cluster":      {func(f *fakeMDB) { f.cls = nil }, ErrResourceNotFound},
+		"cluster failure": {func(f *fakeMDB) { f.errs["DescribeClusters"] = errAPI }, errAPI},
+	} {
+		f := newFakeMDB()
+		tc.mutate(f)
+		if _, err := (MemoryDB{API: f, ACLName: "acl", ClusterName: "c"}).Describe(ctx); !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
