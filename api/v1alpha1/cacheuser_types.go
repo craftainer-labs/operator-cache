@@ -23,6 +23,33 @@ const (
 	ProfileReadWrite Profile = "ReadWrite"
 )
 
+// AuthMode is how the user logs in (ADR 0002, section 16.4).
+//
+// +kubebuilder:validation:Enum=Password;IAM
+type AuthMode string
+
+// Values of AuthMode.
+const (
+	// AuthModePassword is a generated password in the binding Secret, with the
+	// two-phase rotation of ADR 0002, section 8. It is the only mode of a
+	// self-hosted server.
+	AuthModePassword AuthMode = "Password"
+	// AuthModeIAM is a cloud login with a short-lived token the consumer's own
+	// identity makes: the operator creates no password, and the binding Secret
+	// holds none. It needs a server with a provider.
+	AuthModeIAM AuthMode = "IAM"
+)
+
+// IAMSpec is spec.iam of an IAM-mode claim: the consumer's cloud identity.
+type IAMSpec struct {
+	// principal is the consumer's cloud identity name. It is refused on AWS,
+	// where the login is named by the operator and the consumer's role is
+	// authorized by the ARN in the binding Secret (IAMPrincipalRequired).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=320
+	Principal string `json:"principal"`
+}
+
 // CacheUserSpec defines the desired state of CacheUser. It is a credential
 // kind: it has no deletionPolicy (the ACL user is always deleted with the
 // claim) and its login is written to a binding Secret.
@@ -33,9 +60,24 @@ const (
 //
 // +kubebuilder:validation:XValidation:rule="self.serverRef.kind in ['ClusterCacheServer', 'CacheServer']",message="serverRef.kind must be ClusterCacheServer or CacheServer"
 // +kubebuilder:validation:XValidation:rule="!has(self.rotationPolicy) || self.managementPolicies == ['*'] || 'Update' in self.managementPolicies",message="rotationPolicy needs the Update management policy"
+// +kubebuilder:validation:XValidation:rule="!has(self.iam) || (has(self.authMode) && self.authMode == 'IAM')",message="iam is allowed only with authMode IAM"
+// +kubebuilder:validation:XValidation:rule="!has(self.rotationPolicy) || !has(self.authMode) || self.authMode == 'Password'",message="rotationPolicy is not allowed with authMode IAM: there is nothing to rotate"
 type CacheUserSpec struct {
 	common.ClaimCommon `json:",inline"`
 	common.Credentials `json:",inline"`
+
+	// authMode is how the user logs in: Password (default) or IAM. IAM needs a
+	// server with a provider; on any other server the claim is refused
+	// (AuthModeUnsupported). It is immutable: another mode is another external
+	// object, so it is a new claim.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="authMode is immutable"
+	// +kubebuilder:default=Password
+	// +optional
+	AuthMode AuthMode `json:"authMode,omitempty"`
+
+	// iam names the consumer's cloud identity. Only with authMode IAM.
+	// +optional
+	IAM *IAMSpec `json:"iam,omitempty"`
 
 	// profile is which commands the user may run on the tenant's keys.
 	// +kubebuilder:default=ReadWrite

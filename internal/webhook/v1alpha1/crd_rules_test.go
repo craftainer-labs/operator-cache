@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -270,6 +271,48 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 			Expect(got.Spec.Profile).To(Equal(cachev1alpha1.ProfileReadWrite))
 			Expect(got.Spec.Channels).To(BeFalse())
 			Expect(got.Spec.RotationPolicy).To(BeNil())
+			Expect(got.Spec.AuthMode).To(Equal(cachev1alpha1.AuthModePassword))
+			Expect(got.Spec.IAM).To(BeNil())
+		})
+
+		It("admits authMode IAM and rejects an unknown mode", func() {
+			u := user("iam")
+			u.Spec.AuthMode = cachev1alpha1.AuthModeIAM
+			Expect(create(u)).To(Succeed())
+
+			u = user("unknown-mode")
+			u.Spec.AuthMode = "Token"
+			rejected(create(u), "authMode")
+		})
+
+		It("keeps authMode immutable", func() {
+			u := user("mode-pinned")
+			Expect(create(u)).To(Succeed())
+			u.Spec.AuthMode = cachev1alpha1.AuthModeIAM
+			rejected(k8sClient.Update(ctx, u), "authMode is immutable")
+		})
+
+		It("allows iam only with authMode IAM, and a bounded principal", func() {
+			u := user("iam-without-mode")
+			u.Spec.IAM = &cachev1alpha1.IAMSpec{Principal: "app@example.test"}
+			rejected(create(u), "iam is allowed only with authMode IAM")
+
+			u = user("iam-principal")
+			u.Spec.AuthMode = cachev1alpha1.AuthModeIAM
+			u.Spec.IAM = &cachev1alpha1.IAMSpec{Principal: "app@example.test"}
+			Expect(create(u)).To(Succeed())
+
+			u = user("iam-long-principal")
+			u.Spec.AuthMode = cachev1alpha1.AuthModeIAM
+			u.Spec.IAM = &cachev1alpha1.IAMSpec{Principal: strings.Repeat("a", 321)}
+			rejected(create(u), "principal")
+		})
+
+		It("forbids a rotationPolicy with authMode IAM", func() {
+			u := user("iam-rotating")
+			u.Spec.AuthMode = cachev1alpha1.AuthModeIAM
+			u.Spec.RotationPolicy = &common.RotationPolicy{Interval: &metav1.Duration{Duration: 2160 * time.Hour}}
+			rejected(create(u), "rotationPolicy is not allowed with authMode IAM")
 		})
 
 		It("admits both profiles and channels", func() {

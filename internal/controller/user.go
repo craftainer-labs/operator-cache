@@ -8,6 +8,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,6 +28,7 @@ import (
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
+	"github.com/craftainer-labs/operator-cache/internal/awscache"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
 )
 
@@ -60,20 +62,60 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	var ext lifecycle.External[cachev1alpha1.CacheUserSpec, userState]
 	if err == nil {
 		opts.ServerHost = be.cfg.Host
-		x := newUserExternal(be, &u)
-		// Deleting a user does not need a Ready server.
+		// Deleting a user does not need a Ready server, and a claim that is going
+		// away is not refused for its authMode.
+		var pre error
 		if u.DeletionTimestamp.IsZero() {
-			x.pre = be.notReady
+			if pre = r.authModeError(&u, be); pre == nil {
+				pre = be.notReady
+			}
 		}
-		x.rec = r.Recorder
-		x.persist = func(ctx context.Context) error { return r.Client.Status().Update(ctx, &u) }
-		x.binding = func(ctx context.Context) (*corev1.Secret, error) { return r.bindingSecret(ctx, &u) }
-		x.drop = func(ctx context.Context, s *corev1.Secret) error {
-			return client.IgnoreNotFound(r.Client.Delete(ctx, s, client.Preconditions{UID: &s.UID}))
+		persist := func(ctx context.Context) error { return r.Client.Status().Update(ctx, &u) }
+		read := func(ctx context.Context) (*corev1.Secret, error) { return r.bindingSecret(ctx, &u) }
+		if be.aws != nil {
+			ext = r.awsExternal(be, &u, pre, persist, read)
+		} else {
+			x := newUserExternal(be, &u)
+			x.pre, x.rec, x.persist, x.binding = pre, r.Recorder, persist, read
+			x.drop = func(ctx context.Context, s *corev1.Secret) error {
+				return client.IgnoreNotFound(r.Client.Delete(ctx, s, client.Preconditions{UID: &s.UID}))
+			}
+			ext = x
 		}
-		ext = x
 	}
 	return lifecycle.Reconcile(ctx, r.Client, &u, u.Spec, ext, opts)
+}
+
+// awsExternal is the External of a claim on an AWS server.
+func (r *UserReconciler) awsExternal(be *backend, u *cachev1alpha1.CacheUser, pre error, persist func(context.Context) error, read func(context.Context) (*corev1.Secret, error)) lifecycle.External[cachev1alpha1.CacheUserSpec, userState] {
+	ext, x := newAWSExternal(be, u)
+	x.pre, x.rec, x.persist, x.binding = pre, r.Recorder, persist, read
+	return ext
+}
+
+// authModeError is the refusal of a claim whose authMode does not fit its
+// server, or nil. It is also an Event with the claim reason of ADR 0002, section
+// 16.1: the lifecycle gives the condition the reason ReconcileError, and the
+// message starts with the claim reason. IAM mode needs a server with a provider,
+// and refuses iam.principal on AWS.
+func (r *UserReconciler) authModeError(u *cachev1alpha1.CacheUser, be *backend) error {
+	if u.Spec.AuthMode != cachev1alpha1.AuthModeIAM {
+		return nil
+	}
+	var err error
+	switch {
+	case be.aws == nil:
+		err = ErrAuthModeUnsupported
+	case u.Spec.IAM != nil:
+		err = ErrIAMPrincipalRefused
+	default:
+		return nil
+	}
+	if r.Recorder != nil {
+		reason, _, _ := strings.Cut(err.Error(), ":")
+		r.Recorder.Eventf(u, nil, corev1.EventTypeWarning, reason, "Reconcile", "%s", err.Error())
+	}
+	return err
 }
 
 // options are the lifecycle options of the controller; resolveErr is the error
@@ -197,7 +239,10 @@ func (r *UserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // userState is what Observe read of a user on the server.
 type userState struct {
+	// info is the user of a self-hosted server.
 	info valkeyacl.UserInfo
+	// aws is the user of an AWS server.
+	aws awscache.User
 }
 
 // userExternal is the lifecycle.Rotator of one CacheUser (ADR 0002, section 8):
@@ -238,7 +283,12 @@ func newUserExternal(be *backend, claim *cachev1alpha1.CacheUser) *userExternal 
 // namespace. The profile is checked again here (the CRD and the webhook have
 // checked it), and Rules checks the namespace.
 func (e *userExternal) tenant(spec cachev1alpha1.CacheUserSpec) (valkeyacl.Tenant, error) {
-	t := valkeyacl.Tenant{Prefix: e.claim.Namespace, Channels: spec.Channels}
+	return tenantOf(e.claim.Namespace, spec)
+}
+
+// tenantOf is the tenant of a claim in namespace, from the spec.
+func tenantOf(namespace string, spec cachev1alpha1.CacheUserSpec) (valkeyacl.Tenant, error) {
+	t := valkeyacl.Tenant{Prefix: namespace, Channels: spec.Channels}
 	switch spec.Profile {
 	case cachev1alpha1.ProfileReadOnly:
 	case cachev1alpha1.ProfileReadWrite, "":
@@ -337,8 +387,11 @@ func (e *userExternal) loginOf(s *corev1.Secret) string {
 // the passwords of more than one generation: a grace period is recorded, or the
 // lifecycle has issued the next rotation (it marks the Secret) and not yet
 // recorded it.
-func (e *userExternal) rotating(s *corev1.Secret) bool {
-	rs := e.claim.GetRotationStatus()
+func (e *userExternal) rotating(s *corev1.Secret) bool { return rotatingOf(e.claim, s) }
+
+// rotatingOf is rotating for the claim, whichever backend it is on.
+func rotatingOf(claim *cachev1alpha1.CacheUser, s *corev1.Secret) bool {
+	rs := claim.GetRotationStatus()
 	return rs.Previous != "" || rs.RetireAfter != nil ||
 		s.Annotations[lifecycle.AnnotationRotationSequence] == strconv.FormatInt(rs.Sequence+1, 10)
 }
@@ -360,9 +413,15 @@ func (e *userExternal) driftOf(info valkeyacl.UserInfo, s *corev1.Secret) drift 
 // report records a drift: a category in the log and an Event, never a hash or a
 // password.
 func (e *userExternal) report(ctx context.Context, category, note string) {
+	reportDrift(ctx, e.rec, e.claim, category, note)
+}
+
+// reportDrift logs the category and records a PasswordDrift Warning Event with
+// the note, which is fixed text, on the claim; a nil recorder records none.
+func reportDrift(ctx context.Context, rec events.EventRecorder, claim *cachev1alpha1.CacheUser, category, note string) {
 	log.FromContext(ctx).Info("the passwords of the user drifted from the binding Secret", "category", category)
-	if e.rec != nil {
-		e.rec.Eventf(e.claim, nil, corev1.EventTypeWarning, "PasswordDrift", "Update", "%s", note)
+	if rec != nil {
+		rec.Eventf(claim, nil, corev1.EventTypeWarning, "PasswordDrift", "Update", "%s", note)
 	}
 }
 

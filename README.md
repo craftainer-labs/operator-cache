@@ -19,7 +19,7 @@ All three are in the API group `cache.craftainer.dev/v1alpha1`. Samples are in
 | --- | --- | --- |
 | `ClusterCacheServer` | cluster | A server many namespaces may claim from. `allowedNamespaces` is required (it fails closed) and `adminCredentialsSecretRef.namespace` is required. |
 | `CacheServer` | namespaced | A server only claims in its own namespace may use. Its admin Secret is in the same namespace. |
-| `CacheUser` | namespaced | An ACL user on a server (`serverRef`), with a `profile` (`ReadOnly` or `ReadWrite`) and optional `channels`. Its login is written to a binding Secret of type `servicebinding.io/redis`. |
+| `CacheUser` | namespaced | An ACL user on a server (`serverRef`), with a `profile` (`ReadOnly` or `ReadWrite`), optional `channels` and an `authMode` (`Password`, or `IAM` on a cloud server). Its login is written to a binding Secret of type `servicebinding.io/redis`. |
 
 Both server kinds set `host`, an admin credentials Secret (keys `username` and
 `password`), and optionally `port` (6379 where unset; the schema sets no default, so a cloud server can tell an override from a default), `mode` (only `Standalone`),
@@ -30,7 +30,7 @@ so a claim cannot name another namespace's keys. `@dangerous` and `@admin`
 commands are never granted. A `CacheUser` has no `deletionPolicy`: its ACL user
 is always deleted with the claim.
 
-### Cloud servers (API only so far)
+### Cloud servers (Amazon ElastiCache and MemoryDB)
 
 A server may instead set `provider` (AWS only; the provider cannot be added, removed or changed to another cloud once set) and `credentials`
 (`source` `WorkloadIdentity`, the default, or `Secret`; a namespaced server must
@@ -45,9 +45,53 @@ A namespaced server has no `endpointOverride` field, so one a tenant sets is
 pruned by the API server and ignored, not rejected.
 `status.discovered` holds what the probe reads from the cloud.
 
-This version only carries the schema: a server with a provider is not probed and
-its claims wait with an unusable-configuration condition. The ElastiCache and
-MemoryDB users follow in the next change. Self-hosted servers are unchanged.
+The administrator creates the replication group or cluster and its user group
+or ACL and attaches them; the operator only makes users and adds them to that
+user group or ACL. The server's probe does not read the cloud yet (it follows in
+the next change), so a server with a provider is not Ready and its claims wait
+until it is. Self-hosted servers are unchanged.
+
+#### Users on AWS
+
+A `CacheUser` on a server with a provider is one ElastiCache or MemoryDB user,
+made with the AWS API (`ACL SETUSER` is refused by both services) through
+`aws-sdk-go-v2` over the egress policy:
+
+- `status.externalName` is the user id: the namespace and the claim name cut to
+  40 characters with a 50-bit hash, letters, digits and single hyphens, starting
+  with a letter. `status.externalId` is the user's ARN. The user carries the tag
+  `craftainer.dev/claim=<namespace>/<name>/<uid>`; a user of that id with
+  another tag, or none, is a `NameCollision` and is never changed or deleted.
+- The user's access string is the tenant's rules: `on`, the key pattern
+  `<namespace>:*` (`%R~` for `ReadOnly`), the channel pattern with `channels`,
+  `@read` (and `@write`, `@pubsub`) and never `@dangerous`, `@admin` or
+  `@scripting`. It is set at every write and compared with what AWS reports
+  (ignoring order), so a user widened by hand is repaired.
+- Both services are asynchronous. A write is one step: create the user (the
+  binding Secret is written at once, with the password), add it to the user
+  group or ACL, set the access string. After a step, and while the user or its
+  group is not `active`, the claim is `Ready=False` with reason `Creating`,
+  `Updating` or `Deleting` and `Synced=True`, and is looked at again after ten
+  seconds. Deleting calls `DeleteUser` and waits until the user is gone.
+- The binding Secret has the keys of a self-hosted one (`host`, `port`,
+  `username`, `password`, `uri`, `keyPrefix`; `sslrootcert` only when the server
+  sets a CA bundle) and `cloud` (`aws`), `region` and `authMode`. The address is
+  the server's `host` and `port` where set, else what the probe discovered
+  (`status.discovered`), else port 6379; without one, no user is made.
+- A rotation keeps the binding's password beside a new one (AWS allows two) and,
+  after the grace period, only the binding's.
+
+`spec.authMode` is `Password` (the default) or `IAM`, and cannot change. In `IAM`
+mode the user has no password: it is made with authentication mode `iam`, its id
+equals its name, the binding Secret holds no password and names the user's ARN
+as `iamResourceArn`, and the consumer logs in with a token its own role signs
+(`elasticache:Connect` or `memorydb:connect` on the user and on the cluster; the
+operator grants nothing). `rotationPolicy` is forbidden, and the `craftainer.dev/rotate`
+annotation is acknowledged with a `RotationNotApplicable` Event. `IAM` on a
+server without a provider is refused (Event reason `AuthModeUnsupported`, the
+condition is `ReconcileError`), and so is `spec.iam.principal` on AWS
+(`IAMPrincipalRequired`): the consumer's role is authorized by the ARN, not by a
+name the claim chooses.
 
 ## Controllers
 
@@ -258,6 +302,34 @@ from one `probe.Reconciler` of `lib-operator-go` (`pkg/probe`) per kind, wired i
   the operator's limits"), from the claim path and from the probe alike. The
   replies the operator reads (`INFO server`, `HELLO`, `ACL GETUSER`) are a few
   kilobytes.
+
+- **On AWS only the number of passwords is visible.** ElastiCache and MemoryDB
+  never return a password or its hash, so the operator cannot tell which
+  password of a user is its own. It repairs a user that holds more passwords
+  than the binding Secret and a rotation explain by setting the binding's
+  password alone, but it cannot notice a binding Secret whose password the user
+  does not hold (a password changed by hand): that claim is rotated by
+  deleting its Secret or by the `craftainer.dev/rotate` annotation.
+- **A retried rotation on AWS can drop the previous password early.** A retry
+  after the binding Secret was written but before the rotation was recorded
+  reads the new password as the current one and sets `[new, new']`, which ends
+  the password consumers still use. The window is the two writes between
+  `RotateBegin` and the mark.
+- **The AWS client is built at every reconcile.** The credentials are resolved
+  and the SDK client made for each reconcile of a claim; nothing is cached
+  between them (the Valkey connection of a self-hosted server is).
+- **The data plane of an AWS server is untested here.** The tests run against
+  an AWS emulator, which does not validate IAM tokens, and a real IRSA or Pod
+  Identity identity is not exercised in CI: whether `AUTH` with a token works, and
+  whether the role the operator runs as holds the permissions it needs
+  (`elasticache:CreateUser`, `DescribeUsers`, `ModifyUser`, `DeleteUser`,
+  `DescribeUserGroups`, `ModifyUserGroup`, `ListTagsForResource`, `AddTagsToResource`
+  or the `memorydb:` equivalents: `CreateUser`, `DescribeUsers`, `UpdateUser`,
+  `DeleteUser`, `DescribeACLs`, `UpdateACL`, `ListTags`, `TagResource`), are checked only against a real account.
+- **The access string is compared by its rules, not their order.** AWS may
+  return the string normalised, so the operator compares the sorted rules; a
+  user whose rules were reordered by hand, which changes what some of them
+  mean, is not noticed.
 
 ## Install
 

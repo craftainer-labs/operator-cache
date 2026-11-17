@@ -55,6 +55,20 @@ spec:
           spec:
             description: spec defines the desired state of CacheUser
             properties:
+              authMode:
+                default: Password
+                description: |-
+                  authMode is how the user logs in: Password (default) or IAM. IAM needs a
+                  server with a provider; on any other server the claim is refused
+                  (AuthModeUnsupported). It is immutable: another mode is another external
+                  object, so it is a new claim.
+                enum:
+                - Password
+                - IAM
+                type: string
+                x-kubernetes-validations:
+                - message: authMode is immutable
+                  rule: self == oldSelf
               binding:
                 description: Binding configures the binding Secret.
                 properties:
@@ -75,6 +89,21 @@ spec:
                   channels grants publish and subscribe on the tenant's channel pattern
                   (&<namespace>:*). It is off by default.
                 type: boolean
+              iam:
+                description: iam names the consumer's cloud identity. Only with authMode
+                  IAM.
+                properties:
+                  principal:
+                    description: |-
+                      principal is the consumer's cloud identity name. It is refused on AWS,
+                      where the login is named by the operator and the consumer's role is
+                      authorized by the ARN in the binding Secret (IAMPrincipalRequired).
+                    maxLength: 320
+                    minLength: 1
+                    type: string
+                required:
+                - principal
+                type: object
               managementPolicies:
                 default:
                 - '*'
@@ -164,6 +193,12 @@ spec:
             - message: rotationPolicy needs the Update management policy
               rule: '!has(self.rotationPolicy) || self.managementPolicies == [''*'']
                 || ''Update'' in self.managementPolicies'
+            - message: iam is allowed only with authMode IAM
+              rule: '!has(self.iam) || (has(self.authMode) && self.authMode == ''IAM'')'
+            - message: 'rotationPolicy is not allowed with authMode IAM: there is
+                nothing to rotate'
+              rule: '!has(self.rotationPolicy) || !has(self.authMode) || self.authMode
+                == ''Password'''
           status:
             description: status defines the observed state of CacheUser
             properties:

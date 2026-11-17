@@ -23,6 +23,7 @@ import (
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
+	"github.com/craftainer-labs/operator-cache/internal/awscache"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
 )
 
@@ -92,6 +93,11 @@ func TestCoarse(t *testing.T) {
 		{"cloud credentials namespace", wrap(server.ErrCredentialsSecretNamespaceForbidden), "the server's cloud credentials are not usable", false},
 		{"cloud credentials", wrap(server.ErrCredentialsUnavailable), "the server's cloud credentials are not usable", false},
 		{"cloud not supported", wrap(ErrCloudNotSupported), "a server with a provider is not supported in this version", false},
+		{"AWS credentials", wrap(cloud.ErrCredentialsUnavailable), "the server's cloud credentials are not usable", false},
+		{"AWS workload identity", wrap(cloud.ErrWorkloadIdentityForbidden), "the server's cloud credentials are not usable", false},
+		{"endpoint override", wrap(cloud.ErrEndpointOverrideForbidden), "the server's endpoint override is not allowed", false},
+		{"invalid endpoint", wrap(cloud.ErrInvalidEndpoint), "the server's endpoint override is not allowed", false},
+		{"user group", wrap(awscache.ErrTargetNotFound), "the user group or ACL the server names does not exist", false},
 		{"invalid server", wrap(server.ErrInvalidServer), "the server's configuration or admin credentials are not usable", false},
 		{"operator namespace", wrap(server.ErrOperatorNamespaceUnset), "the server's configuration or admin credentials are not usable", false},
 		{"egress", fmt.Errorf("%w: %w", valkeyacl.ErrUnavailable, wrap(egress.ErrBlocked)), "the connection to the server was refused by the egress policy", true},
@@ -127,11 +133,16 @@ func TestCoarse(t *testing.T) {
 	// and so does an error that was made coarse.
 	for _, err := range []error{
 		fmt.Errorf("%w: %q", lifecycle.ErrNameCollision, "n"), ErrBindingNotUsable, ErrServerNotReady,
-		fmt.Errorf("%w: x", ErrInvalidSpec), ErrPasswordNotOnServer,
+		fmt.Errorf("%w: x", ErrInvalidSpec), ErrPasswordNotOnServer, ErrAuthModeUnsupported, ErrIAMPrincipalRefused, ErrAddressUnknown,
 	} {
 		if got := coarse(ctx, "op", err); got.Error() != err.Error() || !errors.Is(got, err) {
 			t.Errorf("%v changed to %v", err, got)
 		}
+	}
+	// A pending state is not a failure and is not touched.
+	pending := fmt.Errorf("wrapped: %w", lifecycle.Pending(pendingAfter, conditions.Creating, "waiting"))
+	if got := coarse(ctx, "op", pending); got != pending {
+		t.Errorf("a pending state changed to %v", got)
 	}
 	once := coarse(ctx, "op", wrap(valkeyacl.ErrTimeout))
 	if again := coarse(ctx, "op", once); again.Error() != once.Error() || !errors.Is(again, valkeyacl.ErrTimeout) {
@@ -283,23 +294,5 @@ func TestNames(t *testing.T) {
 	if serverKey("ns1", ref) == serverKey("ns2", ref) || serverKey("ns1", cluster) != serverKey("ns2", cluster) ||
 		serverKey("ns", ref) == serverKey("ns", cluster) {
 		t.Error("server keys")
-	}
-}
-
-// A claim on a server with a provider fails with its own kind: this version has
-// no cloud flow, and the server has no admin Secret to blame.
-func TestBackendRefusesAProvider(t *testing.T) {
-	h := newHarness(t, func(s *cachev1alpha1.ClusterCacheServer) {
-		s.Spec.Host, s.Spec.AdminCredentialsSecretRef = "", nil
-		s.Spec.Provider = &cachev1alpha1.ClusterProvider{Type: cloud.ProviderAWS, AWS: &cachev1alpha1.ClusterAWSCache{
-			AWSClusterBlock: cloud.AWSClusterBlock{AWSBlock: cloud.AWSBlock{Region: "eu-west-1"}},
-			AWSTarget: cachev1alpha1.AWSTarget{
-				ElastiCache: &cachev1alpha1.ElastiCacheTarget{UserGroupID: "craftainer", ReplicationGroupID: "sessions"},
-			},
-		}}
-	})
-	_, err := h.cfg.backend(context.Background(), h.ns, h.ref())
-	if err == nil || err.Error() != "a server with a provider is not supported in this version" {
-		t.Errorf("a server with a provider: %v", err)
 	}
 }

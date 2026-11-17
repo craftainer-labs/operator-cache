@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
@@ -83,7 +84,13 @@ type Config struct {
 	// is a credential kind and has none, so it only goes to the framework.
 	DefaultDeletionPolicy common.DeletionPolicy
 	Egress                egress.Policy
-	Connect               ConnectFunc
+	// EgressMode is the mode Egress was made from; cloud.Egress needs it, because
+	// an endpoint override is honoured only in allow-private mode.
+	EgressMode egress.Mode
+	// NewAWS builds the client of an AWS server; nil is NewAWSClient. Tests
+	// replace it.
+	NewAWS  NewAWSFunc
+	Connect ConnectFunc
 	// Cache keeps the connection of each server between reconciles; nil
 	// connects for every use and closes the connection when the reconcile is
 	// over, so the operator always sets one.
@@ -103,6 +110,9 @@ type backend struct {
 	conn server.Connection
 	// notReady is ErrServerNotReady while the server reports Ready=False.
 	notReady error
+	// aws is set for a server with a provider, which has no Valkey connection of
+	// its own: the claim drives the cloud's API.
+	aws *awsBackend
 	// server returns the logged-in connection to the server, connecting on first
 	// use: a claim whose server is not Ready never connects.
 	server func(ctx context.Context) (Valkey, error)
@@ -131,8 +141,10 @@ type serverObject struct {
 	generation int64
 	cfg        cachev1alpha1.ServerConfig
 	conditions []metav1.Condition
-	// provider is set when the server is a managed cloud cache.
-	provider bool
+	// aws is set when the server is a managed cache in AWS.
+	aws *AWSServer
+	// discovered is status.discovered, what the probe read from the cloud.
+	discovered map[string]string
 }
 
 // backend resolves ref for a claim in ns: the connection settings through
@@ -158,12 +170,16 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	if err != nil {
 		return nil, coarse(ctx, "read the server", err)
 	}
+	if obj.aws != nil {
+		b := &backend{cfg: obj.cfg, conn: conn, aws: c.newAWSBackend(obj, cconn)}
+		if serverNotReady(obj.conditions) {
+			b.notReady = ErrServerNotReady
+		}
+		return b, nil
+	}
 	dial, err := c.Egress.HostDialer(conn.Proxy)
 	if err != nil {
 		return nil, coarse(ctx, "build the dialer", fmt.Errorf("%w: %w", server.ErrInvalidServer, err))
-	}
-	if obj.provider {
-		return nil, coarse(ctx, "check the server kind", fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrCloudNotSupported))
 	}
 	cfg, err := adminConfig(obj.cfg, conn, dial)
 	if err != nil {
@@ -206,11 +222,25 @@ func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef
 	if ref.Kind == kindClusterCacheServer {
 		var s cachev1alpha1.ClusterCacheServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
-		return serverObject{s.UID, s.Generation, s.Spec.ServerConfig, s.Status.Conditions, s.Spec.Provider != nil}, err
+		obj := serverObject{uid: s.UID, generation: s.Generation, cfg: s.Spec.ServerConfig, conditions: s.Status.Conditions, discovered: s.Status.Discovered}
+		if p := s.Spec.Provider; p != nil && p.AWS != nil {
+			obj.aws = &AWSServer{
+				Scope: cloud.ScopeCluster, Block: p.AWS.AWSClusterBlock, Credentials: s.Spec.Credentials,
+				ElastiCache: p.AWS.ElastiCache, MemoryDB: p.AWS.MemoryDB,
+			}
+		}
+		return obj, err
 	}
 	var s cachev1alpha1.CacheServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
-	return serverObject{s.UID, s.Generation, s.Spec.ServerConfig, s.Status.Conditions, s.Spec.Provider != nil}, err
+	obj := serverObject{uid: s.UID, generation: s.Generation, cfg: s.Spec.ServerConfig, conditions: s.Status.Conditions, discovered: s.Status.Discovered}
+	if p := s.Spec.Provider; p != nil && p.AWS != nil {
+		obj.aws = &AWSServer{
+			Scope: cloud.ScopeNamespaced, Block: cloud.AWSClusterBlock{AWSBlock: p.AWS.AWSBlock},
+			Credentials: s.Spec.Credentials.AsCredentials(), ElastiCache: p.AWS.ElastiCache, MemoryDB: p.AWS.MemoryDB,
+		}
+	}
+	return obj, err
 }
 
 // stamp identifies what a cached connection was made from: the server object
