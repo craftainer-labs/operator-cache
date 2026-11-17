@@ -148,9 +148,6 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      # The tests are their own package (test/integration/awscloud); the build
-      # tags integration and moto keep them out of `go test ./...` and out of
-      # the Valkey job.
       - name: Install golangci-lint
         run: |
           set -euo pipefail
@@ -164,6 +161,8 @@ jobs:
           tar -xzf "$tmp/$dir.tar.gz" -C "$tmp"
           echo "$tmp/$dir" >> "$GITHUB_PATH"
 
+      # internal/controller is linted with the tags too: its integration_aws.go
+      # (build tag integration) exports the constructors the tests wire.
       - name: Lint the AWS integration tests
         run: golangci-lint run --build-tags integration,moto ./test/integration/awscloud/... ./internal/controller/...
 
@@ -186,6 +185,9 @@ jobs:
           echo "moto did not become ready" >&2
           exit 1
 
+      # The tests are their own package (test/integration/awscloud); the build
+      # tags integration and moto keep them out of `go test ./...`. The operator
+      # binary is built without the tags and holds none of this.
       - name: Run the AWS backend tests
         run: |
           set -euo pipefail

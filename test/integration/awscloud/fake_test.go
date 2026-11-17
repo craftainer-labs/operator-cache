@@ -158,14 +158,14 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // do sends a request to moto with the headers of the SDK's (which carry the
 // credential scope moto picks the service and region from).
 func (f *fake) do(ctx context.Context, hdr http.Header, method, uri string, body []byte) (int, http.Header, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, method, f.moto+uri, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, f.moto+uri, bytes.NewReader(body)) //nolint:gosec // the test fake relays to the moto container this test started
 	if err != nil {
 		return 0, nil, nil, err
 	}
 	req.Header = hdr.Clone()
 	req.Header.Del("Accept-Encoding") // the transport then decompresses for us
 	req.Header.Del("Content-Length")
-	resp, err := f.client.Do(req)
+	resp, err := f.client.Do(req) //nolint:gosec // the test fake relays to the moto container this test started
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -188,7 +188,7 @@ func relay(w http.ResponseWriter, status int, hdr http.Header, body []byte) {
 		}
 	}
 	w.WriteHeader(status)
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) //nolint:gosec // moto's own answer, relayed unchanged to the SDK of the test
 }
 
 func (f *fake) relayForward(w http.ResponseWriter, r *http.Request, body []byte) {

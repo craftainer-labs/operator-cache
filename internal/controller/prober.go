@@ -8,6 +8,7 @@ import (
 	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/probe"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
@@ -91,11 +92,11 @@ func (p Prober) probeAWS(ctx context.Context, s AWSServer, conn server.CloudConn
 	}
 	api, err := newAWS(ctx, s, cloud.Egress{Mode: p.Config.EgressMode, Policy: p.Config.Egress, Proxy: conn.Proxy})
 	if err != nil {
-		return probe.CloudResult{}, categoryOnly(err)
+		return probe.CloudResult{}, probeFailed(ctx, err)
 	}
 	t, err := api.Describe(ctx)
 	if err != nil {
-		return probe.CloudResult{}, categoryOnly(err)
+		return probe.CloudResult{}, probeFailed(ctx, err)
 	}
 	d := map[string]string{cachev1alpha1.DiscoveredRegion: s.Block.Region}
 	for k, v := range map[string]string{
@@ -110,6 +111,14 @@ func (p Prober) probeAWS(ctx context.Context, s AWSServer, conn server.CloudConn
 		d[cachev1alpha1.DiscoveredPort] = strconv.Itoa(int(t.Port))
 	}
 	return probe.CloudResult{Version: t.Version, Discovered: d}, nil
+}
+
+// probeFailed logs the raw error of a failed AWS probe, which holds the
+// server's address, and returns its category only. The log line is the one
+// place the category of the failure is told apart.
+func probeFailed(ctx context.Context, err error) error {
+	log.FromContext(ctx).Error(err, "the probe failed", "operation", "probe")
+	return categoryOnly(err)
 }
 
 // categoryOnly replaces the text of err with the fixed text of its kind. The

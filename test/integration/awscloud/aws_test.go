@@ -210,8 +210,9 @@ func until[S, O any](t *testing.T, observe func(context.Context, S) (O, error), 
 		}
 		return o
 	}
-	t.Fatal("the user did not settle")
-	panic("unreachable")
+	t.Errorf("the user did not settle")
+	var zero O
+	return zero
 }
 
 // The probe reads the server from the service: the data-plane address, the

@@ -1036,7 +1036,7 @@ func TestPendingIsBounded(t *testing.T) {
 
 	// Without a Ready condition there is no clock.
 	at(PendingDeadline * 2)
-	if got := x.bounded(pending); got != pending {
+	if got := x.bounded(pending); !errors.Is(got, pending) {
 		t.Errorf("no condition: %v", got)
 	}
 	if x.bounded(nil) != nil || !errors.Is(x.bounded(errAPITest), errAPITest) {
@@ -1045,7 +1045,7 @@ func TestPendingIsBounded(t *testing.T) {
 	for _, reason := range pendingReasons {
 		ready(metav1.ConditionFalse, reason)
 		at(PendingDeadline)
-		if got := x.bounded(pending); got != pending {
+		if got := x.bounded(pending); !errors.Is(got, pending) {
 			t.Errorf("%s at the deadline: %v", reason, got)
 		}
 		at(PendingDeadline + time.Second)
@@ -1055,11 +1055,11 @@ func TestPendingIsBounded(t *testing.T) {
 	}
 	// A Ready that is True, or False for another reason, is not a wait.
 	ready(metav1.ConditionTrue, conditions.Available)
-	if got := x.bounded(pending); got != pending {
+	if got := x.bounded(pending); !errors.Is(got, pending) {
 		t.Errorf("ready: %v", got)
 	}
 	ready(metav1.ConditionFalse, "NameCollision")
-	if got := x.bounded(pending); got != pending {
+	if got := x.bounded(pending); !errors.Is(got, pending) {
 		t.Errorf("another reason: %v", got)
 	}
 
@@ -1068,7 +1068,7 @@ func TestPendingIsBounded(t *testing.T) {
 	x.claim.Status.Conditions = []metav1.Condition{{
 		Type: conditions.Ready, Status: metav1.ConditionFalse, Reason: conditions.Creating, LastTransitionTime: metav1.NewTime(time.Now()),
 	}}
-	if got := x.bounded(pending); got != pending {
+	if got := x.bounded(pending); !errors.Is(got, pending) {
 		t.Errorf("recent: %v", got)
 	}
 	x.claim.Status.Conditions[0].LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * PendingDeadline))
