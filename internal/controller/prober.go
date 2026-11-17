@@ -43,11 +43,11 @@ var _ probe.CloudProber = Prober{}
 // self-hosted settings unchanged; a server with a provider has no admin Secret
 // and is not supported yet, so it fails as an unusable configuration.
 func (p Prober) ProbeCloud(ctx context.Context, srv server.CloudServer, conn server.CloudConnection) (probe.CloudResult, error) {
-	spec, err := serverConfigOf(srv)
+	spec, provider, err := serverConfigOf(srv)
 	if err != nil {
 		return probe.CloudResult{}, err
 	}
-	if hasProvider(srv) {
+	if provider {
 		return probe.CloudResult{}, categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrCloudNotSupported))
 	}
 	dial, err := p.Config.Egress.HostDialer(conn.Proxy)
@@ -84,24 +84,14 @@ func categoryOnly(err error) error {
 	return &coarseError{text: defaultText, errs: []error{err}}
 }
 
-// serverConfigOf returns the Valkey fields of a server kind of this operator.
-func serverConfigOf(srv server.CloudServer) (cachev1alpha1.ServerConfig, error) {
+// serverConfigOf returns the Valkey fields of a server kind of this operator
+// and whether the server has a provider.
+func serverConfigOf(srv server.CloudServer) (cachev1alpha1.ServerConfig, bool, error) {
 	switch s := srv.(type) {
 	case *cachev1alpha1.ClusterCacheServer:
-		return s.Spec.ServerConfig, nil
+		return s.Spec.ServerConfig, s.Spec.Provider != nil, nil
 	case *cachev1alpha1.CacheServer:
-		return s.Spec.ServerConfig, nil
+		return s.Spec.ServerConfig, s.Spec.Provider != nil, nil
 	}
-	return cachev1alpha1.ServerConfig{}, fmt.Errorf("%w: %T", server.ErrUnknownServerKind, srv)
-}
-
-// hasProvider reports whether the server is a managed cloud cache.
-func hasProvider(srv server.CloudServer) bool {
-	switch s := srv.(type) {
-	case *cachev1alpha1.ClusterCacheServer:
-		return s.Spec.Provider != nil
-	case *cachev1alpha1.CacheServer:
-		return s.Spec.Provider != nil
-	}
-	return false
+	return cachev1alpha1.ServerConfig{}, false, fmt.Errorf("%w: %T", server.ErrUnknownServerKind, srv)
 }
