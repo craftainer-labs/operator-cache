@@ -131,6 +131,8 @@ type serverObject struct {
 	generation int64
 	cfg        cachev1alpha1.ServerConfig
 	conditions []metav1.Condition
+	// provider is set when the server is a managed cloud cache.
+	provider bool
 }
 
 // backend resolves ref for a claim in ns: the connection settings through
@@ -146,7 +148,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		// (other namespaces share the entry), so it is not on this list.
 		if errors.Is(err, server.ErrServerNotFound) || errors.Is(err, server.ErrInvalidServer) ||
 			errors.Is(err, server.ErrAdminSecretNamespaceForbidden) ||
-			errors.Is(err, server.ErrCredentialsSecretNamespaceForbidden) || errors.Is(err, server.ErrCredentialsUnavailable) {
+			errors.Is(err, server.ErrCredentialsSecretNamespaceForbidden) {
 			c.Cache.Forget(key)
 		}
 		return nil, coarse(ctx, "resolve the server", err)
@@ -160,9 +162,12 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	if err != nil {
 		return nil, coarse(ctx, "build the dialer", fmt.Errorf("%w: %w", server.ErrInvalidServer, err))
 	}
+	if obj.provider {
+		return nil, coarse(ctx, "check the server kind", fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrCloudNotSupported))
+	}
 	cfg, err := adminConfig(obj.cfg, conn, dial)
 	if err != nil {
-		return nil, coarse(ctx, "read the admin Secret (or the server has a provider)", err)
+		return nil, coarse(ctx, "read the admin Secret", err)
 	}
 	version := stamp(obj, cfg, conn.Proxy)
 	b := &backend{cfg: obj.cfg, conn: conn}
@@ -201,11 +206,11 @@ func (c Config) fetchServer(ctx context.Context, ns string, ref common.ServerRef
 	if ref.Kind == kindClusterCacheServer {
 		var s cachev1alpha1.ClusterCacheServer
 		err := c.Client.Get(ctx, client.ObjectKey{Name: ref.Name}, &s)
-		return serverObject{s.UID, s.Generation, s.Spec.ServerConfig, s.Status.Conditions}, err
+		return serverObject{s.UID, s.Generation, s.Spec.ServerConfig, s.Status.Conditions, s.Spec.Provider != nil}, err
 	}
 	var s cachev1alpha1.CacheServer
 	err := c.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &s)
-	return serverObject{s.UID, s.Generation, s.Spec.ServerConfig, s.Status.Conditions}, err
+	return serverObject{s.UID, s.Generation, s.Spec.ServerConfig, s.Status.Conditions, s.Spec.Provider != nil}, err
 }
 
 // stamp identifies what a cached connection was made from: the server object

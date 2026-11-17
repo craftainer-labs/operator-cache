@@ -16,11 +16,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
+	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
 )
 
@@ -281,5 +283,23 @@ func TestNames(t *testing.T) {
 	if serverKey("ns1", ref) == serverKey("ns2", ref) || serverKey("ns1", cluster) != serverKey("ns2", cluster) ||
 		serverKey("ns", ref) == serverKey("ns", cluster) {
 		t.Error("server keys")
+	}
+}
+
+// A claim on a server with a provider fails with its own kind: this version has
+// no cloud flow, and the server has no admin Secret to blame.
+func TestBackendRefusesAProvider(t *testing.T) {
+	h := newHarness(t, func(s *cachev1alpha1.ClusterCacheServer) {
+		s.Spec.Host, s.Spec.AdminCredentialsSecretRef = "", nil
+		s.Spec.Provider = &cachev1alpha1.ClusterProvider{Type: cloud.ProviderAWS, AWS: &cachev1alpha1.ClusterAWSCache{
+			AWSClusterBlock: cloud.AWSClusterBlock{AWSBlock: cloud.AWSBlock{Region: "eu-west-1"}},
+			AWSTarget: cachev1alpha1.AWSTarget{
+				ElastiCache: &cachev1alpha1.ElastiCacheTarget{UserGroupID: "craftainer", ReplicationGroupID: "sessions"},
+			},
+		}}
+	})
+	_, err := h.cfg.backend(context.Background(), h.ns, h.ref())
+	if err == nil || err.Error() != "a server with a provider is not supported in this version" {
+		t.Errorf("a server with a provider: %v", err)
 	}
 }
