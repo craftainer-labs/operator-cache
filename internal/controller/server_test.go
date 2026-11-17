@@ -22,7 +22,6 @@ import (
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
-	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 	"github.com/craftainer-labs/operator-cache/internal/awscache"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
 )

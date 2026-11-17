@@ -358,7 +358,7 @@ func (e *userExternal) observe(ctx context.Context, spec cachev1alpha1.CacheUser
 		}
 		upToDate = !e.driftOf(info, s).any()
 	}
-	return lifecycle.Observation[userState]{Exists: true, UpToDate: upToDate, Current: userState{info}}, nil
+	return lifecycle.Observation[userState]{Exists: true, UpToDate: upToDate, Current: userState{info: info}}, nil
 }
 
 // drift is how the passwords on the server and the binding Secret disagree.
