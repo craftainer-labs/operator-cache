@@ -47,6 +47,9 @@ func (p Prober) ProbeCloud(ctx context.Context, srv server.CloudServer, conn ser
 	if err != nil {
 		return probe.CloudResult{}, err
 	}
+	if hasProvider(srv) {
+		return probe.CloudResult{}, categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrCloudNotSupported))
+	}
 	dial, err := p.Config.Egress.HostDialer(conn.Proxy)
 	if err != nil {
 		return probe.CloudResult{}, categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, err))
@@ -90,4 +93,15 @@ func serverConfigOf(srv server.CloudServer) (cachev1alpha1.ServerConfig, error) 
 		return s.Spec.ServerConfig, nil
 	}
 	return cachev1alpha1.ServerConfig{}, fmt.Errorf("%w: %T", server.ErrUnknownServerKind, srv)
+}
+
+// hasProvider reports whether the server is a managed cloud cache.
+func hasProvider(srv server.CloudServer) bool {
+	switch s := srv.(type) {
+	case *cachev1alpha1.ClusterCacheServer:
+		return s.Spec.Provider != nil
+	case *cachev1alpha1.CacheServer:
+		return s.Spec.Provider != nil
+	}
+	return false
 }

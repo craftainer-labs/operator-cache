@@ -11,6 +11,7 @@ import (
 // +kubebuilder:validation:XValidation:rule="!has(self.adminCredentialsSecretRef) || (has(self.adminCredentialsSecretRef.namespace) && self.adminCredentialsSecretRef.namespace != '')",message="adminCredentialsSecretRef.namespace is required on a cluster-scoped server"
 // +kubebuilder:validation:XValidation:rule="has(self.provider) ? !has(self.adminCredentialsSecretRef) : has(self.adminCredentialsSecretRef)",message="adminCredentialsSecretRef is required without provider and forbidden with one"
 // +kubebuilder:validation:XValidation:rule="has(self.provider) || (has(self.host) && size(self.host) > 0)",message="host is required without provider"
+// +kubebuilder:validation:XValidation:rule="has(self.provider) == has(oldSelf.provider)",message="provider cannot be added or removed: a server does not move between self-hosted and a cloud"
 // +kubebuilder:validation:XValidation:rule="!has(self.provider) || self.provider.type == 'AWS'",message="only provider.type AWS is supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.credentials) || has(self.provider)",message="credentials is allowed only with provider"
 

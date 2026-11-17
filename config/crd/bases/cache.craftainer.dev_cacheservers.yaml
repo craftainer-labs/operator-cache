@@ -140,8 +140,10 @@ spec:
                 - Standalone
                 type: string
               port:
-                default: 6379
-                description: port is the server's TLS port.
+                description: |-
+                  port is the server's TLS port. Unset means 6379 for a self-hosted server
+                  (the controller applies it, not the schema, so that a cloud server can
+                  tell an override from a default).
                 format: int32
                 maximum: 65535
                 minimum: 1
@@ -301,6 +303,9 @@ spec:
               rule: 'has(self.provider) ? !has(self.adminCredentialsSecretRef) : has(self.adminCredentialsSecretRef)'
             - message: host is required without provider
               rule: has(self.provider) || (has(self.host) && size(self.host) > 0)
+            - message: 'provider cannot be added or removed: a server does not move
+                between self-hosted and a cloud'
+              rule: has(self.provider) == has(oldSelf.provider)
             - message: only provider.type AWS is supported
               rule: '!has(self.provider) || self.provider.type == ''AWS'''
             - message: credentials is allowed only with provider

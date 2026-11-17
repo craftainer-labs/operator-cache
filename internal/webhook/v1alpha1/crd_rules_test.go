@@ -71,7 +71,7 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 			Expect(create(clusterServer("defaults"))).To(Succeed())
 			got := &cachev1alpha1.ClusterCacheServer{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "defaults"}, got)).To(Succeed())
-			Expect(got.Spec.Port).To(HaveValue(Equal(int32(6379))))
+			Expect(got.Spec.Port).To(BeNil()) // the controller defaults it, so a cloud server can tell an override
 			Expect(got.Spec.Mode).To(Equal(cachev1alpha1.ModeStandalone))
 			Expect(got.GetEndpoint()).To(Equal("rediss://valkey.cache.svc:6379"))
 		})
@@ -196,6 +196,32 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 			b := clusterServer("no-host")
 			b.Spec.Host = ""
 			rejected(create(b), "host is required without provider")
+		})
+
+		It("needs a host on a namespaced server without a provider", func() {
+			b := server("no-host-namespaced")
+			b.Spec.Host = ""
+			rejected(create(b), "host is required without provider")
+		})
+
+		It("keeps the server from moving between self-hosted and a cloud", func() {
+			c := cloudCluster("move-cluster")
+			Expect(create(c)).To(Succeed())
+			c.Spec.Provider, c.Spec.Host = nil, "valkey.cache.svc"
+			c.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin", Namespace: "craftainer-system"}
+			rejected(k8sClient.Update(ctx, c), "provider cannot be added or removed")
+
+			n := cloudNamespaced("move-namespaced")
+			Expect(create(n)).To(Succeed())
+			n.Spec.Provider, n.Spec.Credentials, n.Spec.Host = nil, nil, "valkey.team-a.svc"
+			n.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin"}
+			rejected(k8sClient.Update(ctx, n), "provider cannot be added or removed")
+
+			s := server("move-self-hosted")
+			Expect(create(s)).To(Succeed())
+			p := cloudNamespaced("x").Spec
+			s.Spec.Provider, s.Spec.Credentials, s.Spec.Host, s.Spec.AdminCredentialsSecretRef = p.Provider, p.Credentials, "", nil
+			rejected(k8sClient.Update(ctx, s), "provider cannot be added or removed")
 		})
 
 		It("forbids the admin Secret with a provider and requires it without", func() {

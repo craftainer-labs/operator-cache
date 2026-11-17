@@ -27,6 +27,9 @@ var (
 	ErrInvalidSpec = errors.New("the user's profile or namespace is not valid")
 	// ErrAdminCredentials means the admin Secret lacks the username or password.
 	ErrAdminCredentials = errors.New("the admin Secret needs the keys username and password")
+	// ErrCloudNotSupported means the server has a provider, and this version
+	// reaches only self-hosted servers.
+	ErrCloudNotSupported = errors.New("a server with a provider is not supported in this version")
 	// ErrPasswordNotOnServer means the password the binding Secret holds is not
 	// one of the user's, so no password is dropped.
 	ErrPasswordNotOnServer = errors.New("the binding Secret's password is not one of the user's; nothing was changed")
@@ -90,6 +93,9 @@ var rules = []rule{
 	{is(server.ErrServerNotFound), "the referenced server was not found", false},
 	{is(server.ErrNamespaceNotAllowed), "the claim's namespace is not allowed by the server", false},
 	{is(server.ErrAdminSecretNamespaceForbidden), "the server's admin credentials are not usable", false},
+	{is(server.ErrCredentialsSecretNamespaceForbidden), "the server's cloud credentials are not usable", false},
+	{is(server.ErrCredentialsUnavailable), "the server's cloud credentials are not usable", false},
+	{is(ErrCloudNotSupported), "a server with a provider is not supported in this version", false},
 	{is(server.ErrInvalidServer), "the server's configuration or admin credentials are not usable", false},
 	{is(server.ErrOperatorNamespaceUnset), "the server's configuration or admin credentials are not usable", false},
 	{isEgress, "the connection to the server was refused by the egress policy", true},

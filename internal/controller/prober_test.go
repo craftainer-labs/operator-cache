@@ -162,3 +162,19 @@ func (p Prober) Probe(ctx context.Context, srv server.CloudServer, conn server.C
 	res, err := p.ProbeCloud(ctx, srv, server.CloudConnection{Connection: conn})
 	return res.Version, err
 }
+
+// A server with a provider is not probed: it fails as an unusable configuration
+// with its own text, before any admin login is read.
+func TestProberRefusesAProvider(t *testing.T) {
+	cluster := &cachev1alpha1.ClusterCacheServer{}
+	cluster.Spec.Provider = &cachev1alpha1.ClusterProvider{}
+	namespaced := &cachev1alpha1.CacheServer{}
+	namespaced.Spec.Provider = &cachev1alpha1.Provider{}
+	for name, srv := range map[string]server.CloudServer{"cluster": cluster, "namespaced": namespaced} {
+		p, cfgs := probeFixture("9.1.2", nil)
+		_, err := p.Probe(context.Background(), srv, server.Connection{})
+		if !errors.Is(err, ErrCloudNotSupported) || !errors.Is(err, server.ErrInvalidServer) || len(*cfgs) != 0 {
+			t.Errorf("%s: %v, %d probes", name, err, len(*cfgs))
+		}
+	}
+}

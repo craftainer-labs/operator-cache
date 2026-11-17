@@ -22,7 +22,7 @@ All three are in the API group `cache.craftainer.dev/v1alpha1`. Samples are in
 | `CacheUser` | namespaced | An ACL user on a server (`serverRef`), with a `profile` (`ReadOnly` or `ReadWrite`) and optional `channels`. Its login is written to a binding Secret of type `servicebinding.io/redis`. |
 
 Both server kinds set `host`, an admin credentials Secret (keys `username` and
-`password`), and optionally `port` (default 6379), `mode` (only `Standalone`),
+`password`), and optionally `port` (6379 where unset; the schema sets no default, so a cloud server can tell an override from a default), `mode` (only `Standalone`),
 `tls`, `proxyURL` and `healthCheckInterval`. The operator reaches a server over
 TLS only. The key pattern of a user is always the tenant's key prefix,
 `<namespace>:*`, and the channel pattern `&<namespace>:*`; neither is a field,
@@ -32,7 +32,7 @@ is always deleted with the claim.
 
 ### Cloud servers (API only so far)
 
-A server may instead set `provider` (AWS only; `type` is immutable) and `credentials`
+A server may instead set `provider` (AWS only; the provider cannot be added, removed or changed to another cloud once set) and `credentials`
 (`source` `WorkloadIdentity`, the default, or `Secret`; a namespaced server must
 use `Secret`), as in ADR 0002 section 16 of `lib-operator-go`. `provider.aws`
 holds `region`, an optional `roleARN`, on a cluster server an `endpointOverride`
@@ -41,6 +41,8 @@ one of `elasticache: {userGroupID, replicationGroupID}` and
 `memorydb: {aclName, clusterName}`. With a provider, `host` is optional (it
 overrides the discovered address) and `adminCredentialsSecretRef` is forbidden;
 without one, `host` and `adminCredentialsSecretRef` are required as before.
+A namespaced server has no `endpointOverride` field, so one a tenant sets is
+pruned by the API server and ignored, not rejected.
 `status.discovered` holds what the probe reads from the cloud.
 
 This version only carries the schema: a server with a provider is not probed and

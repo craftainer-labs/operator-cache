@@ -42,8 +42,9 @@ type ServerConfig struct {
 	// +optional
 	Host string `json:"host,omitempty"`
 
-	// port is the server's TLS port.
-	// +kubebuilder:default=6379
+	// port is the server's TLS port. Unset means 6379 for a self-hosted server
+	// (the controller applies it, not the schema, so that a cloud server can
+	// tell an override from a default).
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	// +optional

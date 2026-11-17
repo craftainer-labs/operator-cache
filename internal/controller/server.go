@@ -145,7 +145,8 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 		// namespace the server does not serve says nothing about the server
 		// (other namespaces share the entry), so it is not on this list.
 		if errors.Is(err, server.ErrServerNotFound) || errors.Is(err, server.ErrInvalidServer) ||
-			errors.Is(err, server.ErrAdminSecretNamespaceForbidden) {
+			errors.Is(err, server.ErrAdminSecretNamespaceForbidden) ||
+			errors.Is(err, server.ErrCredentialsSecretNamespaceForbidden) || errors.Is(err, server.ErrCredentialsUnavailable) {
 			c.Cache.Forget(key)
 		}
 		return nil, coarse(ctx, "resolve the server", err)
@@ -161,7 +162,7 @@ func (c Config) backend(ctx context.Context, ns string, ref common.ServerRef) (*
 	}
 	cfg, err := adminConfig(obj.cfg, conn, dial)
 	if err != nil {
-		return nil, coarse(ctx, "read the admin Secret", err)
+		return nil, coarse(ctx, "read the admin Secret (or the server has a provider)", err)
 	}
 	version := stamp(obj, cfg, conn.Proxy)
 	b := &backend{cfg: obj.cfg, conn: conn}

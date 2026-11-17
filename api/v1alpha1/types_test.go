@@ -155,4 +155,9 @@ func TestCredentialsSecretOfTheServers(t *testing.T) {
 	namespaced.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "aws"}}
 	name, ns = namespaced.GetCredentialsSecret()
 	g.Expect([]string{name, ns}).To(Equal([]string{"aws", ""}))
+
+	// Workload identity names no Secret on this kind either.
+	namespaced.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceWorkloadIdentity, SecretRef: &cloud.SecretRef{Name: "x"}}
+	name, _ = namespaced.GetCredentialsSecret()
+	g.Expect(name).To(BeEmpty())
 }
