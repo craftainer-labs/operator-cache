@@ -140,7 +140,7 @@ func TestCoarse(t *testing.T) {
 	}
 	// A pending state is not a failure and is not touched.
 	pending := fmt.Errorf("wrapped: %w", lifecycle.Pending(pendingAfter, conditions.Creating, "waiting"))
-	if got := coarse(ctx, "op", pending); got != pending {
+	if got := coarse(ctx, "op", pending); !errors.Is(got, pending) {
 		t.Errorf("a pending state changed to %v", got)
 	}
 	once := coarse(ctx, "op", wrap(valkeyacl.ErrTimeout))

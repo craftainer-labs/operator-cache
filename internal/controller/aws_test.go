@@ -406,14 +406,14 @@ func TestAWSUpdate(t *testing.T) {
 		ext, x := awsExt(t, api, nil)
 		rec := &testenv.Recorder{}
 		x.rec = rec
-		bindingOf(x, "p")
-		activeUser(t, api, x, "p", "rogue")
+		bindingOf(x, "x9-current")
+		activeUser(t, api, x, "x9-current", "x9-rogue")
 		_, err := ext.Update(ctx, extSpec, userState{aws: awscache.User{Member: true, Passwords: 2}})
-		if !isPending(err, conditions.Updating) || len(api.modified) != 1 || !slices.Equal(api.modified[0].Passwords, []string{"p"}) {
+		if !isPending(err, conditions.Updating) || len(api.modified) != 1 || !slices.Equal(api.modified[0].Passwords, []string{"x9-current"}) {
 			t.Errorf("update: %v, %+v", err, api.modified)
 		}
 		rec.AssertEvent(t, corev1.EventTypeWarning, "PasswordDrift", "removed")
-		rec.AssertNoSecret(t, "p", "rogue")
+		rec.AssertNoSecret(t, "x9-current", "x9-rogue")
 	})
 
 	t.Run("an IAM user has no passwords", func(t *testing.T) {
@@ -550,7 +550,7 @@ func TestAWSRotation(t *testing.T) {
 			t.Errorf("binding: %v", err)
 		}
 		errBuild := errors.New("build failed")
-		x.be.aws.build = func(context.Context) (awscache.Client, error) { return nil, errBuild }
+		x.be.aws.client, x.be.aws.build = nil, func(context.Context) (awscache.Client, error) { return nil, errBuild }
 		if err := finish(ext); !errors.Is(err, errBuild) {
 			t.Errorf("build: %v", err)
 		}
