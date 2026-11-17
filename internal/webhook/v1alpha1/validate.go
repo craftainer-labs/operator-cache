@@ -30,11 +30,12 @@ func invalid(kind, name string, errs field.ErrorList) error {
 }
 
 // validateServer checks the host and the proxy URL of a server, for both
-// server kinds. Neither value appears in an error.
+// server kinds. Neither value appears in an error. An empty host is for the
+// schema to judge (it is required only without spec.provider).
 func validateServer(spec *cachev1alpha1.ServerConfig, proxyURL string) field.ErrorList {
 	var errs field.ErrorList
 	path := field.NewPath("spec")
-	if !validHost(spec.Host) {
+	if spec.Host != "" && !validHost(spec.Host) {
 		errs = append(errs, field.Invalid(path.Child("host"), redacted, "must be a host name or an IP address"))
 	}
 	if proxyURL != "" {

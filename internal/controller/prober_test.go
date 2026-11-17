@@ -42,7 +42,7 @@ func TestProberProbesBothKinds(t *testing.T) {
 	namespaced := &cachev1alpha1.CacheServer{}
 	namespaced.Spec.Host = "valkey.example.test"
 
-	for name, srv := range map[string]server.Server{"cluster": cluster, "namespaced": namespaced} {
+	for name, srv := range map[string]server.CloudServer{"cluster": cluster, "namespaced": namespaced} {
 		p, cfgs := probeFixture("9.1.2", nil)
 		got, err := p.Probe(context.Background(), srv, probeConn())
 		if err != nil || got != "9.1.2" {
@@ -154,5 +154,27 @@ func TestProberDefaultsToValkeyaclProbe(t *testing.T) {
 	}
 }
 
-// otherServer is a server.Server this operator does not own.
-type otherServer struct{ server.Server }
+// otherServer is a server.CloudServer this operator does not own.
+type otherServer struct{ server.CloudServer }
+
+// Probe is ProbeCloud of a plain connection, which is what the tests below build.
+func (p Prober) Probe(ctx context.Context, srv server.CloudServer, conn server.Connection) (string, error) {
+	res, err := p.ProbeCloud(ctx, srv, server.CloudConnection{Connection: conn})
+	return res.Version, err
+}
+
+// A server with a provider is not probed: it fails as an unusable configuration
+// with its own text, before any admin login is read.
+func TestProberRefusesAProvider(t *testing.T) {
+	cluster := &cachev1alpha1.ClusterCacheServer{}
+	cluster.Spec.Provider = &cachev1alpha1.ClusterProvider{}
+	namespaced := &cachev1alpha1.CacheServer{}
+	namespaced.Spec.Provider = &cachev1alpha1.Provider{}
+	for name, srv := range map[string]server.CloudServer{"cluster": cluster, "namespaced": namespaced} {
+		p, cfgs := probeFixture("9.1.2", nil)
+		_, err := p.Probe(context.Background(), srv, server.Connection{})
+		if !errors.Is(err, ErrCloudNotSupported) || !errors.Is(err, server.ErrInvalidServer) || len(*cfgs) != 0 {
+			t.Errorf("%s: %v, %d probes", name, err, len(*cfgs))
+		}
+	}
+}

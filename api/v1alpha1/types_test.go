@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 )
@@ -16,9 +17,9 @@ import (
 // The claim kind and the server kinds must satisfy the interfaces the
 // lib-operator-go reconciler is written against.
 var (
-	_ lifecycle.Claim = (*CacheUser)(nil)
-	_ server.Server   = (*CacheServer)(nil)
-	_ server.Server   = (*ClusterCacheServer)(nil)
+	_ lifecycle.Claim    = (*CacheUser)(nil)
+	_ server.CloudServer = (*CacheServer)(nil)
+	_ server.CloudServer = (*ClusterCacheServer)(nil)
 )
 
 func TestAddToSchemeRegistersEveryKind(t *testing.T) {
@@ -54,10 +55,10 @@ func TestEndpointUsesTheDefaults(t *testing.T) {
 func TestCacheServerAccessors(t *testing.T) {
 	g := NewWithT(t)
 	b := &CacheServer{Spec: CacheServerSpec{
-		ServerCommon: common.ServerCommon{ProxyURL: "http://proxy:3128"},
-		ServerConfig: ServerConfig{Host: "valkey"},
+		CloudServerCommon: common.CloudServerCommon{ProxyURL: "http://proxy:3128"},
+		ServerConfig:      ServerConfig{Host: "valkey"},
 	}}
-	g.Expect(b.GetCommon().ProxyURL).To(Equal("http://proxy:3128"))
+	g.Expect(b.GetCloudCommon().ProxyURL).To(Equal("http://proxy:3128"))
 	g.Expect(b.GetEndpoint()).To(Equal("rediss://valkey:6379"))
 	g.Expect(b.GetAllowedNamespaces()).To(BeNil())
 }
@@ -65,11 +66,11 @@ func TestCacheServerAccessors(t *testing.T) {
 func TestClusterCacheServerAccessors(t *testing.T) {
 	g := NewWithT(t)
 	b := &ClusterCacheServer{Spec: ClusterCacheServerSpec{
-		ServerCommon:      common.ServerCommon{ProxyURL: "http://proxy:3128"},
+		CloudServerCommon: common.CloudServerCommon{ProxyURL: "http://proxy:3128"},
 		ServerConfig:      ServerConfig{Host: "valkey"},
 		AllowedNamespaces: common.AllowedNamespaces{From: common.NamespacesAll},
 	}}
-	g.Expect(b.GetCommon().ProxyURL).To(Equal("http://proxy:3128"))
+	g.Expect(b.GetCloudCommon().ProxyURL).To(Equal("http://proxy:3128"))
 	g.Expect(b.GetEndpoint()).To(Equal("rediss://valkey:6379"))
 	g.Expect(b.GetAllowedNamespaces().From).To(Equal(common.NamespacesAll))
 }
@@ -121,4 +122,42 @@ func TestCacheUserAccessors(t *testing.T) {
 	g.Expect(u.GetRotationStatus()).To(Equal(common.RotationStatus{}))
 	u.SetRotationStatus(common.RotationStatus{Active: "g1", Sequence: 2})
 	g.Expect(u.GetRotationStatus()).To(Equal(common.RotationStatus{Active: "g1", Sequence: 2}))
+}
+
+// A server with a provider has no host: its endpoint is empty and the address is
+// discovered.
+func TestEndpointIsEmptyWithoutAHost(t *testing.T) {
+	g := NewWithT(t)
+	g.Expect((&ServerConfig{}).Endpoint()).To(BeEmpty())
+	g.Expect((&CacheServer{}).GetEndpoint()).To(BeEmpty())
+	g.Expect((&ClusterCacheServer{}).GetEndpoint()).To(BeEmpty())
+}
+
+func TestCredentialsSecretOfTheServers(t *testing.T) {
+	g := NewWithT(t)
+	cluster := &ClusterCacheServer{}
+	name, ns := cluster.GetCredentialsSecret()
+	g.Expect([]string{name, ns}).To(Equal([]string{"", ""}))
+
+	// Workload identity names no Secret, even if a reference is left in.
+	cluster.Spec.Credentials = &cloud.Credentials{Source: cloud.SourceWorkloadIdentity, SecretRef: &cloud.SecretRef{Name: "x"}}
+	name, _ = cluster.GetCredentialsSecret()
+	g.Expect(name).To(BeEmpty())
+
+	cluster.Spec.Credentials = &cloud.Credentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "aws", Namespace: "ops"}}
+	name, ns = cluster.GetCredentialsSecret()
+	g.Expect([]string{name, ns}).To(Equal([]string{"aws", "ops"}))
+
+	namespaced := &CacheServer{}
+	name, ns = namespaced.GetCredentialsSecret()
+	g.Expect([]string{name, ns}).To(Equal([]string{"", ""}))
+
+	namespaced.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "aws"}}
+	name, ns = namespaced.GetCredentialsSecret()
+	g.Expect([]string{name, ns}).To(Equal([]string{"aws", ""}))
+
+	// Workload identity names no Secret on this kind either.
+	namespaced.Spec.Credentials = &cloud.NamespacedCredentials{Source: cloud.SourceWorkloadIdentity, SecretRef: &cloud.SecretRef{Name: "x"}}
+	name, _ = namespaced.GetCredentialsSecret()
+	g.Expect(name).To(BeEmpty())
 }

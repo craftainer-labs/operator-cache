@@ -631,7 +631,7 @@ func TestUserOnANamespacedServer(t *testing.T) {
 	team.Spec.Host = "team.example.test"
 	team.Spec.Port = new(int32)
 	*team.Spec.Port = 6380
-	team.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "team-admin"}
+	team.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "team-admin"}
 	team.Spec.TLS = &common.TLS{CABundle: &common.CABundle{SecretRef: &common.KeyReference{Name: "team-ca"}}}
 	h.must(env.Client.Create(ctx, team))
 	u := h.user("app", func(u *cachev1alpha1.CacheUser) {

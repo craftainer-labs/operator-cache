@@ -11,6 +11,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	cachev1alpha1 "github.com/craftainer-labs/operator-cache/api/v1alpha1"
 )
 
@@ -39,8 +40,8 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 		return &cachev1alpha1.ClusterCacheServer{
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: cachev1alpha1.ClusterCacheServerSpec{
-				ServerCommon: common.ServerCommon{
-					AdminCredentialsSecretRef: common.AdminSecretRef{Name: "admin", Namespace: "craftainer-system"},
+				CloudServerCommon: common.CloudServerCommon{
+					AdminCredentialsSecretRef: &common.AdminSecretRef{Name: "admin", Namespace: "craftainer-system"},
 				},
 				ServerConfig:      cachev1alpha1.ServerConfig{Host: "valkey.cache.svc"},
 				AllowedNamespaces: common.AllowedNamespaces{From: common.NamespacesAll},
@@ -51,8 +52,8 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 		return &cachev1alpha1.CacheServer{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Spec: cachev1alpha1.CacheServerSpec{
-				ServerCommon: common.ServerCommon{AdminCredentialsSecretRef: common.AdminSecretRef{Name: "admin"}},
-				ServerConfig: cachev1alpha1.ServerConfig{Host: "valkey.team-a.svc"},
+				CloudServerCommon: common.CloudServerCommon{AdminCredentialsSecretRef: &common.AdminSecretRef{Name: "admin"}},
+				ServerConfig:      cachev1alpha1.ServerConfig{Host: "valkey.team-a.svc"},
 			},
 		}
 	}
@@ -70,7 +71,7 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 			Expect(create(clusterServer("defaults"))).To(Succeed())
 			got := &cachev1alpha1.ClusterCacheServer{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "defaults"}, got)).To(Succeed())
-			Expect(got.Spec.Port).To(HaveValue(Equal(int32(6379))))
+			Expect(got.Spec.Port).To(BeNil()) // the controller defaults it, so a cloud server can tell an override
 			Expect(got.Spec.Mode).To(Equal(cachev1alpha1.ModeStandalone))
 			Expect(got.GetEndpoint()).To(Equal("rediss://valkey.cache.svc:6379"))
 		})
@@ -157,6 +158,106 @@ var _ = Describe("The cache.craftainer.dev CRDs", func() {
 			b := server("leading-hyphen")
 			b.Spec.Host = "-valkey"
 			rejected(create(b), "must be a host name or an IP address")
+		})
+	})
+
+	Describe("a cloud provider", func() {
+		elasticache := &cachev1alpha1.ElastiCacheTarget{UserGroupID: "craftainer", ReplicationGroupID: "sessions"}
+		// cloudCluster is a cluster server with an AWS provider: no host and no
+		// admin Secret.
+		cloudCluster := func(name string) *cachev1alpha1.ClusterCacheServer {
+			b := clusterServer(name)
+			b.Spec.Host, b.Spec.AdminCredentialsSecretRef = "", nil
+			b.Spec.Provider = &cachev1alpha1.ClusterProvider{Type: cloud.ProviderAWS, AWS: &cachev1alpha1.ClusterAWSCache{
+				AWSClusterBlock: cloud.AWSClusterBlock{AWSBlock: cloud.AWSBlock{Region: "eu-west-1"}},
+				AWSTarget:       cachev1alpha1.AWSTarget{ElastiCache: elasticache},
+			}}
+			return b
+		}
+		cloudNamespaced := func(name string) *cachev1alpha1.CacheServer {
+			b := server(name)
+			b.Spec.Host, b.Spec.AdminCredentialsSecretRef = "", nil
+			b.Spec.Provider = &cachev1alpha1.Provider{Type: cloud.ProviderAWS, AWS: &cachev1alpha1.AWSCache{
+				AWSBlock:  cloud.AWSBlock{Region: "eu-west-1"},
+				AWSTarget: cachev1alpha1.AWSTarget{MemoryDB: &cachev1alpha1.MemoryDBTarget{ACLName: "craftainer", ClusterName: "sessions"}},
+			}}
+			b.Spec.Credentials = &cloud.NamespacedCredentials{
+				Source: cloud.SourceSecret, SecretRef: &cloud.SecretRef{Name: "aws"},
+			}
+			return b
+		}
+
+		It("is admitted on both kinds with no host and no admin Secret", func() {
+			Expect(create(cloudCluster("aws-cluster"))).To(Succeed())
+			Expect(create(cloudNamespaced("aws-namespaced"))).To(Succeed())
+		})
+
+		It("needs a host without a provider", func() {
+			b := clusterServer("no-host")
+			b.Spec.Host = ""
+			rejected(create(b), "host is required without provider")
+		})
+
+		It("needs a host on a namespaced server without a provider", func() {
+			b := server("no-host-namespaced")
+			b.Spec.Host = ""
+			rejected(create(b), "host is required without provider")
+		})
+
+		It("keeps the server from moving between self-hosted and a cloud", func() {
+			c := cloudCluster("move-cluster")
+			Expect(create(c)).To(Succeed())
+			c.Spec.Provider, c.Spec.Host = nil, "valkey.cache.svc"
+			c.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin", Namespace: "craftainer-system"}
+			rejected(k8sClient.Update(ctx, c), "provider cannot be added or removed")
+
+			n := cloudNamespaced("move-namespaced")
+			Expect(create(n)).To(Succeed())
+			n.Spec.Provider, n.Spec.Credentials, n.Spec.Host = nil, nil, "valkey.team-a.svc"
+			n.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin"}
+			rejected(k8sClient.Update(ctx, n), "provider cannot be added or removed")
+
+			s := server("move-self-hosted")
+			Expect(create(s)).To(Succeed())
+			p := cloudNamespaced("x").Spec
+			s.Spec.Provider, s.Spec.Credentials, s.Spec.Host, s.Spec.AdminCredentialsSecretRef = p.Provider, p.Credentials, "", nil
+			rejected(k8sClient.Update(ctx, s), "provider cannot be added or removed")
+		})
+
+		It("forbids the admin Secret with a provider and requires it without", func() {
+			b := cloudCluster("provider-and-admin")
+			b.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin", Namespace: "craftainer-system"}
+			rejected(create(b), "adminCredentialsSecretRef is required without provider and forbidden with one")
+
+			b = clusterServer("no-admin")
+			b.Spec.AdminCredentialsSecretRef = nil
+			rejected(create(b), "adminCredentialsSecretRef is required without provider")
+		})
+
+		It("needs exactly one of elasticache and memorydb", func() {
+			b := cloudCluster("both-targets")
+			b.Spec.Provider.AWS.MemoryDB = &cachev1alpha1.MemoryDBTarget{ACLName: "a", ClusterName: "c"}
+			rejected(create(b), "set exactly one of elasticache and memorydb")
+
+			b = cloudCluster("no-target")
+			b.Spec.Provider.AWS.ElastiCache = nil
+			rejected(create(b), "set exactly one of elasticache and memorydb")
+		})
+
+		It("allows only AWS and keeps credentials for a provider", func() {
+			b := cloudCluster("gcp")
+			b.Spec.Provider.Type = cloud.ProviderGCP
+			rejected(create(b), "aws is required with type AWS and forbidden otherwise")
+
+			b = clusterServer("credentials-only")
+			b.Spec.Credentials = &cloud.Credentials{Source: cloud.SourceWorkloadIdentity}
+			rejected(create(b), "credentials is allowed only with provider")
+		})
+
+		It("makes a namespaced server with a provider use credentials", func() {
+			b := cloudNamespaced("no-credentials")
+			b.Spec.Credentials = nil
+			rejected(create(b), "a namespaced server with a provider must set credentials")
 		})
 	})
 

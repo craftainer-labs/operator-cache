@@ -35,29 +35,35 @@ type Prober struct {
 	Check ProbeFunc
 }
 
-var _ probe.Prober = Prober{}
+var _ probe.CloudProber = Prober{}
 
-// Probe returns the version of the server srv names, or an error that names
-// only a category of failure.
-func (p Prober) Probe(ctx context.Context, srv server.Server, conn server.Connection) (string, error) {
-	spec, err := serverConfigOf(srv)
+// ProbeCloud returns the version of the server srv names, or an error that names
+// only a category of failure. Both server kinds are read through the cloud
+// resolvers of lib-operator-go (server.ConnectionForCloud), which return the
+// self-hosted settings unchanged; a server with a provider has no admin Secret
+// and is not supported yet, so it fails as an unusable configuration.
+func (p Prober) ProbeCloud(ctx context.Context, srv server.CloudServer, conn server.CloudConnection) (probe.CloudResult, error) {
+	spec, provider, err := serverConfigOf(srv)
 	if err != nil {
-		return "", err
+		return probe.CloudResult{}, err
+	}
+	if provider {
+		return probe.CloudResult{}, categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, ErrCloudNotSupported))
 	}
 	dial, err := p.Config.Egress.HostDialer(conn.Proxy)
 	if err != nil {
-		return "", categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, err))
+		return probe.CloudResult{}, categoryOnly(fmt.Errorf("%w: %w", server.ErrInvalidServer, err))
 	}
-	cfg, err := adminConfig(spec, conn, dial)
+	cfg, err := adminConfig(spec, conn.Connection, dial)
 	if err != nil {
-		return "", categoryOnly(err)
+		return probe.CloudResult{}, categoryOnly(err)
 	}
 	run := p.Check
 	if run == nil {
 		run = valkeyacl.Probe
 	}
 	version, err := run(ctx, cfg)
-	return version, categoryOnly(err)
+	return probe.CloudResult{Version: version}, categoryOnly(err)
 }
 
 // categoryOnly replaces the text of err with the fixed text of its kind. The
@@ -78,13 +84,14 @@ func categoryOnly(err error) error {
 	return &coarseError{text: defaultText, errs: []error{err}}
 }
 
-// serverConfigOf returns the Valkey fields of a server kind of this operator.
-func serverConfigOf(srv server.Server) (cachev1alpha1.ServerConfig, error) {
+// serverConfigOf returns the Valkey fields of a server kind of this operator
+// and whether the server has a provider.
+func serverConfigOf(srv server.CloudServer) (cachev1alpha1.ServerConfig, bool, error) {
 	switch s := srv.(type) {
 	case *cachev1alpha1.ClusterCacheServer:
-		return s.Spec.ServerConfig, nil
+		return s.Spec.ServerConfig, s.Spec.Provider != nil, nil
 	case *cachev1alpha1.CacheServer:
-		return s.Spec.ServerConfig, nil
+		return s.Spec.ServerConfig, s.Spec.Provider != nil, nil
 	}
-	return cachev1alpha1.ServerConfig{}, fmt.Errorf("%w: %T", server.ErrUnknownServerKind, srv)
+	return cachev1alpha1.ServerConfig{}, false, fmt.Errorf("%w: %T", server.ErrUnknownServerKind, srv)
 }
