@@ -290,6 +290,7 @@ func (e *awsUser) update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, 
 		return lifecycle.Pending(pendingAfter, conditions.Updating, "waiting for the cloud to add the user to its group")
 	}
 	s := awscache.Spec{AccessString: access}
+	drift := false
 	if !e.iam {
 		b, err := e.binding(ctx)
 		if err != nil {
@@ -297,11 +298,16 @@ func (e *awsUser) update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, 
 		}
 		if e.extraPasswords(st.aws, b) {
 			s.Passwords = []string{e.loginOf(b)}
-			reportDrift(ctx, e.rec, e.claim, "unknown-passwords", "the user held passwords the operator did not issue; they were removed")
+			drift = true
 		}
 	}
 	if err := api.Modify(ctx, e.id, s); err != nil {
 		return err
+	}
+	// The Event comes after the write, so that it never says passwords were
+	// removed when AWS refused to remove them.
+	if drift {
+		reportDrift(ctx, e.rec, e.claim, "unknown-passwords", "the user held passwords the operator did not issue; they were removed")
 	}
 	return lifecycle.Pending(pendingAfter, conditions.Updating, "waiting for the cloud to change the user")
 }

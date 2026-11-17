@@ -43,6 +43,13 @@ func TestUserID(t *testing.T) {
 	if got := MarkerValue("ns", "name", "uid"); got != "ns/name/uid" {
 		t.Errorf("marker = %q", got)
 	}
+	long := MarkerValue(strings.Repeat("n", 63), strings.Repeat("a", 253), "0123456789abcdef0123456789abcdef0123")
+	if len(long) > maxTagValueLen || !strings.HasPrefix(long, "sha256:") {
+		t.Errorf("a long marker is hashed to fit a tag value: %q", long)
+	}
+	if other := MarkerValue(strings.Repeat("n", 63), strings.Repeat("a", 253), "ffffffffffffffffffffffffffffffffffff"); other == long {
+		t.Error("two claims share a marker")
+	}
 }
 
 // fakeEC is an ElastiCache SDK client.

@@ -11,6 +11,8 @@ package awscache
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 
@@ -40,9 +42,19 @@ var (
 	ErrTargetNotFound = errors.New("the user group or ACL of the server does not exist")
 )
 
-// MarkerValue is the value of the marker tag for a claim.
+// maxTagValueLen is the longest tag value AWS accepts.
+const maxTagValueLen = 256
+
+// MarkerValue is the value of the marker tag for a claim: "namespace/name/uid",
+// or, when that is longer than a tag value may be, its SHA-256 as "sha256:" and
+// hex digits, which still names exactly one claim.
 func MarkerValue(namespace, name, uid string) string {
-	return namespace + "/" + name + "/" + uid
+	v := namespace + "/" + name + "/" + uid
+	if len(v) <= maxTagValueLen {
+		return v
+	}
+	sum := sha256.Sum256([]byte(v))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // UserID derives the id of the user of a claim: the namespace and name cut to
