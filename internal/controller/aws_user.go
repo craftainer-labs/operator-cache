@@ -307,7 +307,7 @@ func (e *awsUser) update(ctx context.Context, spec cachev1alpha1.CacheUserSpec, 
 	// The Event comes after the write, so that it never says passwords were
 	// removed when AWS refused to remove them.
 	if drift {
-		reportDrift(ctx, e.rec, e.claim, "unknown-passwords", "the user held passwords the operator did not issue; they were removed")
+		reportDrift(ctx, e.rec, e.claim, "unknown-passwords", "the user held passwords the operator did not issue; they are being removed")
 	}
 	return lifecycle.Pending(pendingAfter, conditions.Updating, "waiting for the cloud to change the user")
 }

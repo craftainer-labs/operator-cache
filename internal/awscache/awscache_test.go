@@ -47,6 +47,13 @@ func TestUserID(t *testing.T) {
 	if len(long) > maxTagValueLen || !strings.HasPrefix(long, "sha256:") {
 		t.Errorf("a long marker is hashed to fit a tag value: %q", long)
 	}
+	// 256 characters fit a tag value as they are; 257 are hashed.
+	if got := MarkerValue("n", strings.Repeat("a", 256-len("n//uid")), "uid"); len(got) != 256 || strings.HasPrefix(got, "sha256:") {
+		t.Errorf("a marker of exactly 256 characters stays plain: %d %q", len(got), got)
+	}
+	if got := MarkerValue("n", strings.Repeat("a", 257-len("n//uid")), "uid"); !strings.HasPrefix(got, "sha256:") {
+		t.Errorf("a marker of 257 characters is hashed: %q", got)
+	}
 	if other := MarkerValue(strings.Repeat("n", 63), strings.Repeat("a", 253), "ffffffffffffffffffffffffffffffffffff"); other == long {
 		t.Error("two claims share a marker")
 	}
