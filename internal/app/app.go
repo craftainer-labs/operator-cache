@@ -185,6 +185,7 @@ var ErrInvalidConcurrency = errors.New("--max-concurrent-reconciles must be at l
 // controllerSettings are the checked settings the controllers are built from.
 type controllerSettings struct {
 	egress        egress.Policy
+	egressMode    egress.Mode
 	deletion      common.DeletionPolicy
 	namespace     string
 	maxConcurrent int
@@ -215,7 +216,7 @@ func (s *settings) controllerSettings() (controllerSettings, error) {
 	}
 	ctrl.Log.WithName("setup").Info("controller settings", "egressMode", string(mode),
 		"defaultDataDeletionPolicy", string(policy), "operatorNamespace", ns, "maxConcurrentReconciles", s.maxConcurrent)
-	return controllerSettings{egress: egress.NewPolicy(mode), deletion: policy, namespace: ns, maxConcurrent: s.maxConcurrent}, nil
+	return controllerSettings{egress: egress.NewPolicy(mode), egressMode: mode, deletion: policy, namespace: ns, maxConcurrent: s.maxConcurrent}, nil
 }
 
 // Option adjusts the manager's options; tests use it, the binary passes none.
@@ -352,7 +353,7 @@ func setup(mgr ctrl.Manager, webhooks bool, cs controllerSettings) error {
 	cfg := controller.Config{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Recorder: mgr.GetEventRecorder(EventRecorderName),
 		ManagedBy: EventRecorderName, OperatorNamespace: cs.namespace, DefaultDeletionPolicy: cs.deletion,
-		Egress: cs.egress, Connect: controller.ConnectAdmin, Cache: conns,
+		Egress: cs.egress, EgressMode: cs.egressMode, Connect: controller.ConnectAdmin, Cache: conns,
 		MaxConcurrentReconciles: cs.maxConcurrent,
 	}
 	steps = append(steps,

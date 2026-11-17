@@ -331,6 +331,20 @@ func TestTenantRules(t *testing.T) {
 	}
 }
 
+func TestTenantAccessString(t *testing.T) {
+	got, err := valkeyacl.Tenant{Prefix: "x1", Write: true, Channels: true}.AccessString()
+	want := "on ~x1:* &x1:* -@all +@connection +@read +@write +@pubsub -@dangerous -@admin -@scripting -scan -randomkey -dbsize -client|tracking -pubsub"
+	if err != nil || got != want {
+		t.Errorf("access string = %q, %v\nwant          %q", got, err, want)
+	}
+	if got, err = (valkeyacl.Tenant{Prefix: "a"}).AccessString(); err != nil || !strings.HasPrefix(got, "on %R~a:* -@all") {
+		t.Errorf("read only = %q, %v", got, err)
+	}
+	if _, err = (valkeyacl.Tenant{Prefix: "a*"}).AccessString(); !errors.Is(err, valkeyacl.ErrInvalid) {
+		t.Errorf("a glob prefix: %v", err)
+	}
+}
+
 func TestTenantRefusesPrefixesThatWouldBeGlobs(t *testing.T) {
 	for _, p := range []string{"", "*", "a*", "a?b", "a[b]", "A", "-a", "a-", "a:b", "a b", "%", "a\\b", "a.b"} {
 		if _, err := (valkeyacl.Tenant{Prefix: p}).Rules(); !errors.Is(err, valkeyacl.ErrInvalid) {

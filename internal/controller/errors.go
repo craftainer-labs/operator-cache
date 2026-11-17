@@ -8,10 +8,12 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/craftainer-labs/lib-operator-go/pkg/cloud"
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 
+	"github.com/craftainer-labs/operator-cache/internal/awscache"
 	"github.com/craftainer-labs/operator-cache/internal/valkeyacl"
 )
 
@@ -30,6 +32,17 @@ var (
 	// ErrCloudNotSupported means the server has a provider, and this version
 	// reaches only self-hosted servers.
 	ErrCloudNotSupported = errors.New("a server with a provider is not supported in this version")
+	// ErrAuthModeUnsupported means the claim asks for authMode IAM on a server
+	// that has no provider. The text starts with the claim reason of ADR 0002,
+	// section 16.1, which is also the Event's reason.
+	ErrAuthModeUnsupported = errors.New("AuthModeUnsupported: authMode IAM needs a server with a provider")
+	// ErrIAMPrincipalRefused means iam.principal is set on AWS, where the login
+	// is named by the operator and the consumer's role is authorized by the ARN
+	// in the binding Secret.
+	ErrIAMPrincipalRefused = errors.New("IAMPrincipalRequired: iam.principal is not used on AWS")
+	// ErrAddressUnknown means the server sets no host and its probe has not
+	// discovered an endpoint, so no binding can be built.
+	ErrAddressUnknown = errors.New("the server's address is not known yet: it sets no host and none has been discovered")
 	// ErrPasswordNotOnServer means the password the binding Secret holds is not
 	// one of the user's, so no password is dropped.
 	ErrPasswordNotOnServer = errors.New("the binding Secret's password is not one of the user's; nothing was changed")
@@ -90,6 +103,14 @@ var rules = []rule{
 	{is(ErrServerNotReady), "", false},
 	{is(ErrInvalidSpec), "", false},
 	{is(ErrPasswordNotOnServer), "", false},
+	{is(ErrAuthModeUnsupported), "", false},
+	{is(ErrIAMPrincipalRefused), "", false},
+	{is(ErrAddressUnknown), "", false},
+	{is(awscache.ErrTargetNotFound), "the user group or ACL the server names does not exist", false},
+	{is(cloud.ErrCredentialsUnavailable), "the server's cloud credentials are not usable", false},
+	{is(cloud.ErrWorkloadIdentityForbidden), "the server's cloud credentials are not usable", false},
+	{is(cloud.ErrEndpointOverrideForbidden), "the server's endpoint override is not allowed", false},
+	{is(cloud.ErrInvalidEndpoint), "the server's endpoint override is not allowed", false},
 	{is(server.ErrServerNotFound), "the referenced server was not found", false},
 	{is(server.ErrNamespaceNotAllowed), "the claim's namespace is not allowed by the server", false},
 	{is(server.ErrAdminSecretNamespaceForbidden), "the server's admin credentials are not usable", false},
@@ -115,8 +136,12 @@ const defaultText = "the operation failed; the operator log has the details"
 // coarse turns err into what conditions and Events may carry, and logs the raw
 // error with the operation it came from. nil stays nil.
 func coarse(ctx context.Context, op string, err error) error {
-	var already *coarseError
-	if err == nil || errors.As(err, &already) {
+	var (
+		already *coarseError
+		pending *lifecycle.PendingError
+	)
+	// A pending state is not a failure: it needs no text and no log line.
+	if err == nil || errors.As(err, &already) || errors.As(err, &pending) {
 		return err
 	}
 	text, unreachable := defaultText, false

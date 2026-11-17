@@ -3,6 +3,7 @@ package valkeyacl
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -85,6 +86,20 @@ func (t Tenant) Rules() ([]string, error) {
 		rules = append(rules, t.ChannelPattern())
 	}
 	return append(rules, t.commandRules()...), nil
+}
+
+// AccessString is the user's permissions in the form ElastiCache and MemoryDB
+// take (their ModifyUser replaces them whole, and there are no "reset" rules):
+// the rules of Rules without the three that reset what a SETUSER leaves.
+func (t Tenant) AccessString() (string, error) {
+	rules, err := t.Rules()
+	if err != nil {
+		return "", err
+	}
+	rules = slices.DeleteFunc(rules, func(r string) bool {
+		return r == "clearselectors" || r == "resetkeys" || r == "resetchannels"
+	})
+	return strings.Join(rules, " "), nil
 }
 
 // Matches reports whether a user is what the tenant's rules make: on, with a
